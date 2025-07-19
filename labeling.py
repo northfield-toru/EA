@@ -499,7 +499,485 @@ class ScalpingLabeler:
         
         return validation_results
 
+    def _check_buy_condition_relaxed(self, current_price: float, future_max: float, future_min: float) -> bool:
+        """
+        緩和されたBUY条件（利確重視）
+        """
+        entry_price = current_price + self.utils.pips_to_price(self.spread_pips / 2)
+        
+        # 利確条件のみ（損切り条件は考慮しない）
+        profit_target = entry_price + self.utils.pips_to_price(self.profit_pips)
+        profit_achieved = future_max >= profit_target
+        
+        return profit_achieved
+    
+    def _check_sell_condition_relaxed(self, current_price: float, future_max: float, future_min: float) -> bool:
+        """
+        緩和されたSELL条件（利確重視）
+        """
+        entry_price = current_price - self.utils.pips_to_price(self.spread_pips / 2)
+        
+        # 利確条件のみ（損切り条件は考慮しない）
+        profit_target = entry_price - self.utils.pips_to_price(self.profit_pips)
+        profit_achieved = future_min <= profit_target
+        
+        return profit_achieved
+    
+    def create_balanced_labels_vectorized(self, df: pd.DataFrame, price_col: str = 'close') -> pd.Series:
+        """
+        バランス重視のラベル生成
+        """
+        logger.info(f"バランス重視ラベル生成開始: {len(df)} 行")
+        
+        prices = df[price_col].values
+        labels = np.zeros(len(prices), dtype=int)
+        
+        buy_count = 0
+        sell_count = 0
+        
+        for i in range(len(prices) - 1):
+            future_max, future_min = self._calculate_future_extremes(prices, i)
+            
+            # 緩和条件でBUY/SELLをチェック
+            buy_viable = self._check_buy_condition_relaxed(prices[i], future_max, future_min)
+            sell_viable = self._check_sell_condition_relaxed(prices[i], future_max, future_min)
+            
+            if buy_viable and sell_viable:
+                # 両方可能な場合、より大きな利益の方向を選択
+                buy_potential = future_max - (prices[i] + self.utils.pips_to_price(self.spread_pips / 2))
+                sell_potential = (prices[i] - self.utils.pips_to_price(self.spread_pips / 2)) - future_min
+                
+                if buy_potential > sell_potential:
+                    labels[i] = 1  # BUY
+                    buy_count += 1
+                else:
+                    labels[i] = 2  # SELL
+                    sell_count += 1
+            elif buy_viable:
+                labels[i] = 1  # BUY
+                buy_count += 1
+            elif sell_viable:
+                labels[i] = 2  # SELL
+                sell_count += 1
+            # それ以外はNO_TRADE（0のまま）
+        
+        # バランス調整（SELLが少なすぎる場合の補正）
+        if sell_count < buy_count * 0.1:  # SELLがBUYの10%未満の場合
+            logger.warning(f"SELL不足検出 (BUY:{buy_count}, SELL:{sell_count}) - 補正実行")
+            labels = self._rebalance_labels(labels, prices)
+        
+        # 統計表示
+        unique, counts = np.unique(labels, return_counts=True)
+        label_stats = dict(zip(unique, counts))
+        logger.info(f"バランス調整後ラベル統計: {label_stats}")
+        
+        return pd.Series(labels, index=df.index, name='balanced_label')
+    
+    def _rebalance_labels(self, labels: np.array, prices: np.array) -> np.array:
+        """
+        ラベルの再バランス調整
+        """
+        # BUYラベルの一部をSELLに変更する補正ロジック
+        buy_indices = np.where(labels == 1)[0]
+        
+        # BUYの20%程度をSELLに変更
+        sell_candidates = np.random.choice(buy_indices, size=int(len(buy_indices) * 0.2), replace=False)
+        
+        for idx in sell_candidates:
+            # 実際にSELL条件を満たすかチェック
+            future_max, future_min = self._calculate_future_extremes(prices, idx)
+            if self._check_sell_condition_relaxed(prices[idx], future_max, future_min):
+                labels[idx] = 2  # SELLに変更
+        
+        return labels
 
+    def _check_buy_condition_strict(self, current_price: float, future_max: float, future_min: float) -> bool:
+        """
+        厳格なBUY条件（ChatGPT提案：AND条件必須）
+        両方の条件を満たす場合のみTRADE認定
+        """
+        entry_price = current_price + self.utils.pips_to_price(self.spread_pips / 2)
+        
+        # 利確条件：必須
+        profit_target = entry_price + self.utils.pips_to_price(self.profit_pips)
+        profit_achieved = future_max >= profit_target
+        
+        # 損切り条件：必須（緩和しない）
+        loss_threshold = entry_price - self.utils.pips_to_price(self.loss_pips)
+        no_excessive_loss = future_min >= loss_threshold
+        
+        # 🔧 ChatGPT提案：AND条件のみ（OR条件は使わない）
+        return profit_achieved and no_excessive_loss
+    
+    def _check_sell_condition_strict(self, current_price: float, future_max: float, future_min: float) -> bool:
+        """
+        厳格なSELL条件（ChatGPT提案：AND条件必須）
+        """
+        entry_price = current_price - self.utils.pips_to_price(self.spread_pips / 2)
+        
+        # 利確条件：必須
+        profit_target = entry_price - self.utils.pips_to_price(self.profit_pips)
+        profit_achieved = future_min <= profit_target
+        
+        # 損切り条件：必須
+        loss_threshold = entry_price + self.utils.pips_to_price(self.loss_pips)
+        no_excessive_loss = future_max <= loss_threshold
+        
+        # 🔧 ChatGPT提案：AND条件のみ
+        return profit_achieved and no_excessive_loss
+    
+    def create_binary_labels_strict(self, df: pd.DataFrame, price_col: str = 'close') -> pd.Series:
+        """
+        厳格な2値分類ラベル生成（ChatGPT提案実装）
+        目標：TRADE vs NO_TRADE の比率を 1:2 〜 1:5 程度に調整
+        """
+        logger.info(f"厳格2値分類ラベル生成開始: {len(df)} 行")
+        
+        if len(df) == 0:
+            return pd.Series([], dtype=int, name='strict_binary_label')
+        
+        prices = df[price_col].values
+        labels = np.zeros(len(prices), dtype=int)  # 0=NO_TRADE
+        
+        trade_count = 0
+        no_trade_count = 0
+        
+        for i in range(len(prices) - 1):
+            try:
+                future_max, future_min = self._calculate_future_extremes(prices, i)
+                
+                # 厳格な条件でBUY/SELLをチェック
+                buy_viable = self._check_buy_condition_strict(prices[i], future_max, future_min)
+                sell_viable = self._check_sell_condition_strict(prices[i], future_max, future_min)
+                
+                # いずれかの方向でTRADE条件を満たせばTRADE
+                if buy_viable or sell_viable:
+                    labels[i] = 1  # TRADE
+                    trade_count += 1
+                else:
+                    labels[i] = 0  # NO_TRADE
+                    no_trade_count += 1
+                    
+            except Exception as e:
+                if trade_count + no_trade_count < 10:
+                    logger.warning(f"行 {i} の処理でエラー: {e}")
+                labels[i] = 0  # エラー時はNO_TRADE
+                no_trade_count += 1
+        
+        # 最後の行
+        labels[-1] = 0
+        no_trade_count += 1
+        
+        # 統計表示
+        total = len(labels)
+        trade_ratio = trade_count / total
+        no_trade_ratio = no_trade_count / total
+        
+        logger.info(f"厳格ラベル統計:")
+        logger.info(f"  TRADE: {trade_count:,} ({trade_ratio:.1%})")
+        logger.info(f"  NO_TRADE: {no_trade_count:,} ({no_trade_ratio:.1%})")
+        logger.info(f"  目標範囲: TRADE 10-30%, NO_TRADE 70-90%")
+        
+        # バランスチェック
+        if trade_ratio > 0.5:
+            logger.warning("⚠️ TRADEシグナルが多すぎます。profit_pipsを増やすかloss_pipsを減らしてください")
+        elif trade_ratio < 0.05:
+            logger.warning("⚠️ TRADEシグナルが少なすぎます。profit_pipsを減らすかloss_pipsを増やしてください")
+        else:
+            logger.info("✅ 適切なバランスです")
+        
+        return pd.Series(labels, index=df.index, name='strict_binary_label')
+    
+    # さらに、条件をより厳格にするためのヘルパーメソッド
+    def get_strict_labeler_config() -> dict:
+        """
+        厳格ラベリング用の推奨設定
+        """
+        return {
+            'profit_pips': 6.0,        # 利確目標（適度）
+            'loss_pips': 4.0,          # 損切り許容（厳格）
+            'lookforward_ticks': 80,   # 観測期間（短縮）
+            'use_or_conditions': False # AND条件必須
+        }
+
+    def _check_buy_condition_profit_focused(self, current_price: float, future_max: float, future_min: float) -> bool:
+        """
+        勝率重視のBUY条件（ChatGPT+Claude提案）
+        - 利確目標: 9pips（より高い要求）
+        - 損切り許容: 3pips（より厳格）
+        - AND条件必須
+        """
+        entry_price = current_price + self.utils.pips_to_price(self.spread_pips / 2)
+        
+        # より高い利確目標
+        profit_target = entry_price + self.utils.pips_to_price(9.0)
+        profit_achieved = future_max >= profit_target
+        
+        # より狭い損切り許容
+        loss_threshold = entry_price - self.utils.pips_to_price(3.0)
+        no_excessive_loss = future_min >= loss_threshold
+        
+        # 厳格なAND条件
+        return profit_achieved and no_excessive_loss
+    
+    def _check_sell_condition_profit_focused(self, current_price: float, future_max: float, future_min: float) -> bool:
+        """
+        勝率重視のSELL条件（ChatGPT+Claude提案）
+        """
+        entry_price = current_price - self.utils.pips_to_price(self.spread_pips / 2)
+        
+        # より高い利確目標
+        profit_target = entry_price - self.utils.pips_to_price(9.0)
+        profit_achieved = future_min <= profit_target
+        
+        # より狭い損切り許容
+        loss_threshold = entry_price + self.utils.pips_to_price(3.0)
+        no_excessive_loss = future_max <= loss_threshold
+        
+        # 厳格なAND条件
+        return profit_achieved and no_excessive_loss
+    
+    def create_profit_focused_labels(self, df: pd.DataFrame, price_col: str = 'close') -> pd.Series:
+        """
+        Phase 2A: 勝率重視の2値分類ラベル生成
+        - 高い利確要求（9pips）
+        - 小さな損切り許容（3pips）
+        - 確実性の高いシグナルのみTRADE認定
+        
+        Args:
+            df: OHLCV DataFrame
+            price_col: 価格列名
+        Returns:
+            Series: ラベル（0=NO_TRADE, 1=TRADE）
+        """
+        logger.info(f"Phase 2A: 勝率重視ラベル生成開始: {len(df)} 行")
+        logger.info("条件: 利確9pips, 損切り3pips, AND条件")
+        
+        if len(df) == 0:
+            return pd.Series([], dtype=int, name='profit_focused_label')
+        
+        prices = df[price_col].values
+        labels = np.zeros(len(prices), dtype=int)
+        
+        high_confidence_trade = 0
+        conservative_no_trade = 0
+        
+        for i in range(len(prices) - 1):
+            try:
+                future_max, future_min = self._calculate_future_extremes(prices, i)
+                
+                # 勝率重視の厳格条件でチェック
+                buy_viable = self._check_buy_condition_profit_focused(prices[i], future_max, future_min)
+                sell_viable = self._check_sell_condition_profit_focused(prices[i], future_max, future_min)
+                
+                # 高確信度シグナルのみTRADE
+                if buy_viable or sell_viable:
+                    labels[i] = 1  # 高確信度TRADE
+                    high_confidence_trade += 1
+                else:
+                    labels[i] = 0  # 保守的NO_TRADE
+                    conservative_no_trade += 1
+                    
+            except Exception as e:
+                if high_confidence_trade + conservative_no_trade < 10:
+                    logger.warning(f"行 {i} の処理でエラー: {e}")
+                labels[i] = 0  # エラー時は保守的にNO_TRADE
+                conservative_no_trade += 1
+        
+        # 最後の行
+        labels[-1] = 0
+        conservative_no_trade += 1
+        
+        # 統計分析
+        total = len(labels)
+        trade_ratio = high_confidence_trade / total
+        no_trade_ratio = conservative_no_trade / total
+        
+        logger.info(f"Phase 2A ラベル統計:")
+        logger.info(f"  高確信TRADE: {high_confidence_trade:,} ({trade_ratio:.1%})")
+        logger.info(f"  保守的NO_TRADE: {conservative_no_trade:,} ({no_trade_ratio:.1%})")
+        
+        # 目標評価
+        if 0.10 <= trade_ratio <= 0.25:
+            logger.info("✅ 理想的なTRADE比率（10-25%）です")
+        elif trade_ratio > 0.25:
+            logger.warning("⚠️ TRADEが多すぎます。さらに厳格化を検討")
+        elif trade_ratio < 0.05:
+            logger.warning("⚠️ TRADEが少なすぎます。条件を少し緩和検討")
+        else:
+            logger.info("✓ 適度なTRADE比率です")
+        
+        return pd.Series(labels, index=df.index, name='profit_focused_label')
+    
+    def create_ultra_conservative_labels(self, df: pd.DataFrame, price_col: str = 'close') -> pd.Series:
+        """
+        さらに保守的なラベル生成（必要時のオプション）
+        - 利確12pips, 損切り2pips
+        - 最高品質シグナルのみ
+        """
+        logger.info(f"超保守的ラベル生成開始: {len(df)} 行")
+        logger.info("条件: 利確12pips, 損切り2pips, 超厳格")
+        
+        prices = df[price_col].values
+        labels = np.zeros(len(prices), dtype=int)
+        
+        ultra_trade = 0
+        
+        for i in range(len(prices) - 1):
+            future_max, future_min = self._calculate_future_extremes(prices, i)
+            
+            # 超厳格BUY条件
+            buy_entry = prices[i] + self.utils.pips_to_price(self.spread_pips / 2)
+            buy_big_profit = buy_entry + self.utils.pips_to_price(12.0)
+            buy_tiny_loss = buy_entry - self.utils.pips_to_price(2.0)
+            buy_ultra = (future_max >= buy_big_profit) and (future_min >= buy_tiny_loss)
+            
+            # 超厳格SELL条件
+            sell_entry = prices[i] - self.utils.pips_to_price(self.spread_pips / 2)
+            sell_big_profit = sell_entry - self.utils.pips_to_price(12.0)
+            sell_tiny_loss = sell_entry + self.utils.pips_to_price(2.0)
+            sell_ultra = (future_min <= sell_big_profit) and (future_max <= sell_tiny_loss)
+            
+            if buy_ultra or sell_ultra:
+                labels[i] = 1  # 超高確信TRADE
+                ultra_trade += 1
+        
+        logger.info(f"超保守統計: 超高確信TRADE {ultra_trade} ({ultra_trade/len(labels):.1%})")
+        
+        return pd.Series(labels, index=df.index, name='ultra_conservative_label')
+
+    def _check_buy_condition_profit_focused(self, current_price: float, future_max: float, future_min: float) -> bool:
+        """
+        勝率重視のBUY条件（利確9pips, 損切り3pips）
+        """
+        entry_price = current_price + self.utils.pips_to_price(self.spread_pips / 2)
+        
+        # より高い利確目標（9pips）
+        profit_target = entry_price + self.utils.pips_to_price(9.0)
+        profit_achieved = future_max >= profit_target
+        
+        # より狭い損切り許容（3pips）
+        loss_threshold = entry_price - self.utils.pips_to_price(3.0)
+        no_excessive_loss = future_min >= loss_threshold
+        
+        # 厳格なAND条件
+        return profit_achieved and no_excessive_loss
+    
+    def _check_sell_condition_profit_focused(self, current_price: float, future_max: float, future_min: float) -> bool:
+        """
+        勝率重視のSELL条件（利確9pips, 損切り3pips）
+        """
+        entry_price = current_price - self.utils.pips_to_price(self.spread_pips / 2)
+        
+        # より高い利確目標（9pips）
+        profit_target = entry_price - self.utils.pips_to_price(9.0)
+        profit_achieved = future_min <= profit_target
+        
+        # より狭い損切り許容（3pips）
+        loss_threshold = entry_price + self.utils.pips_to_price(3.0)
+        no_excessive_loss = future_max <= loss_threshold
+        
+        # 厳格なAND条件
+        return profit_achieved and no_excessive_loss
+    
+    def create_profit_focused_labels(self, df: pd.DataFrame, price_col: str = 'close') -> pd.Series:
+        """
+        Phase 2A: 勝率重視の2値分類ラベル生成
+        - 高い利確要求（9pips）
+        - 小さな損切り許容（3pips）
+        - 確実性の高いシグナルのみTRADE認定
+        """
+        logger.info(f"Phase 2A: 勝率重視ラベル生成開始: {len(df)} 行")
+        logger.info("条件: 利確9pips, 損切り3pips, AND条件")
+        
+        if len(df) == 0:
+            return pd.Series([], dtype=int, name='profit_focused_label')
+        
+        prices = df[price_col].values
+        labels = np.zeros(len(prices), dtype=int)
+        
+        high_confidence_trade = 0
+        conservative_no_trade = 0
+        
+        for i in range(len(prices) - 1):
+            try:
+                future_max, future_min = self._calculate_future_extremes(prices, i)
+                
+                # 勝率重視の厳格条件でチェック
+                buy_viable = self._check_buy_condition_profit_focused(prices[i], future_max, future_min)
+                sell_viable = self._check_sell_condition_profit_focused(prices[i], future_max, future_min)
+                
+                # 高確信度シグナルのみTRADE
+                if buy_viable or sell_viable:
+                    labels[i] = 1  # 高確信度TRADE
+                    high_confidence_trade += 1
+                else:
+                    labels[i] = 0  # 保守的NO_TRADE
+                    conservative_no_trade += 1
+                    
+            except Exception as e:
+                if high_confidence_trade + conservative_no_trade < 10:
+                    logger.warning(f"行 {i} の処理でエラー: {e}")
+                labels[i] = 0  # エラー時は保守的にNO_TRADE
+                conservative_no_trade += 1
+        
+        # 最後の行
+        labels[-1] = 0
+        conservative_no_trade += 1
+        
+        # 統計分析
+        total = len(labels)
+        trade_ratio = high_confidence_trade / total
+        
+        logger.info(f"Phase 2A ラベル統計:")
+        logger.info(f"  高確信TRADE: {high_confidence_trade:,} ({trade_ratio:.1%})")
+        logger.info(f"  保守的NO_TRADE: {conservative_no_trade:,} ({(1-trade_ratio):.1%})")
+        
+        return pd.Series(labels, index=df.index, name='profit_focused_label')
+    
+    def create_ultra_conservative_labels(self, df: pd.DataFrame, price_col: str = 'close') -> pd.Series:
+        """
+        超保守的なラベル生成（利確12pips, 損切り2pips）
+        """
+        logger.info(f"超保守的ラベル生成開始: {len(df)} 行")
+        logger.info("条件: 利確12pips, 損切り2pips, 超厳格")
+        
+        if len(df) == 0:
+            return pd.Series([], dtype=int, name='ultra_conservative_label')
+        
+        prices = df[price_col].values
+        labels = np.zeros(len(prices), dtype=int)
+        
+        ultra_trade = 0
+        
+        for i in range(len(prices) - 1):
+            try:
+                future_max, future_min = self._calculate_future_extremes(prices, i)
+                
+                # 超厳格BUY条件
+                buy_entry = prices[i] + self.utils.pips_to_price(self.spread_pips / 2)
+                buy_big_profit = buy_entry + self.utils.pips_to_price(12.0)
+                buy_tiny_loss = buy_entry - self.utils.pips_to_price(2.0)
+                buy_ultra = (future_max >= buy_big_profit) and (future_min >= buy_tiny_loss)
+                
+                # 超厳格SELL条件
+                sell_entry = prices[i] - self.utils.pips_to_price(self.spread_pips / 2)
+                sell_big_profit = sell_entry - self.utils.pips_to_price(12.0)
+                sell_tiny_loss = sell_entry + self.utils.pips_to_price(2.0)
+                sell_ultra = (future_min <= sell_big_profit) and (future_max <= sell_tiny_loss)
+                
+                if buy_ultra or sell_ultra:
+                    labels[i] = 1  # 超高確信TRADE
+                    ultra_trade += 1
+            except Exception as e:
+                if ultra_trade < 10:
+                    logger.warning(f"行 {i} の処理でエラー: {e}")
+                continue
+        
+        logger.info(f"超保守統計: 超高確信TRADE {ultra_trade} ({ultra_trade/len(labels):.1%})")
+        
+        return pd.Series(labels, index=df.index, name='ultra_conservative_label')
+    
 class LabelPostProcessor:
     """ラベル後処理クラス"""
     
