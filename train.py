@@ -2236,24 +2236,209 @@ if __name__ == "__main__":
     
     data_path = "data/usdjpy_ticks.csv" if len(sys.argv) < 2 else sys.argv[1]
     
-    print("🚨" * 35)
-    print("    Phase 2E 緊急修正・診断")
-    print("    失敗原因の特定と修正")
-    print("🚨" * 35)
+    print("🔧" * 35)
+    print("    Phase 2E: 緩和パラメータ版")
+    print("    診断結果: パラメータ緩和が必要")
+    print("🔧" * 35)
     
     try:
-        # 緊急修正パイプライン実行
-        emergency_result = run_emergency_fix_pipeline(data_path)
+        # 緩和パラメータでグリッドサーチ実行
+        print("🚀 Phase 2E 緩和パラメータ版実行開始...")
         
-        print(f"\n🏥 診断完了")
+        # より緩い条件のParameterOptimizedTrainer
+        class RelaxedParameterOptimizedTrainer(ParameterOptimizedTrainer):
+            """緩和パラメータ版トレーナー"""
+            
+            def train_single_parameter_set_relaxed(self, 
+                                                  tp_pips: float,
+                                                  sl_pips: float, 
+                                                  trade_threshold: float,
+                                                  sample_size: int = 500000,
+                                                  epochs: int = 25) -> Dict:
+                """緩和版パラメータセット学習"""
+                
+                param_id = f"RELAXED_TP{tp_pips}_SL{sl_pips}_TR{trade_threshold:.2f}"
+                print(f"\n{'='*60}")
+                print(f"緩和パラメータ学習: {param_id}")
+                print(f"TP={tp_pips}pips, SL={sl_pips}pips, TRADE閾値={trade_threshold:.0%}")
+                print(f"{'='*60}")
+                
+                try:
+                    # トレーナー初期化（緩和版）
+                    trainer = ScalpingTrainer(
+                        self.data_path,
+                        profit_pips=tp_pips,
+                        loss_pips=sl_pips,
+                        use_binary_classification=True
+                    )
+                    
+                    # データ読み込み・特徴量生成
+                    if sample_size:
+                        trainer.ohlcv_data = load_sample_data(self.data_path, sample_size)
+                    else:
+                        tick_data = trainer.loader.load_tick_data_auto(self.data_path)
+                        trainer.ohlcv_data = trainer.loader.tick_to_ohlcv_1min(tick_data)
+                    
+                    trainer.features_data = trainer.feature_engineer.create_all_features_enhanced(trainer.ohlcv_data)
+                    
+                    # 緩和ラベル生成
+                    relaxed_labeler = ScalpingLabeler(
+                        profit_pips=tp_pips,
+                        loss_pips=sl_pips,
+                        lookforward_ticks=80,  # 短縮（120→80）
+                        use_or_conditions=True  # 🔧 緩和: AND→OR
+                    )
+                    
+                    # 更に緩和したラベリング条件
+                    trainer.labels_data = relaxed_labeler.create_realistic_profit_labels(
+                        trainer.features_data, tp_pips=tp_pips, sl_pips=sl_pips
+                    )
+                    
+                    # データクリーニング
+                    complete_mask = ~(trainer.features_data.isna().any(axis=1) | trainer.labels_data.isna())
+                    trainer.features_data = trainer.features_data[complete_mask]
+                    trainer.labels_data = trainer.labels_data[complete_mask]
+                    
+                    # ラベル分布確認
+                    label_dist = dict(zip(*np.unique(trainer.labels_data, return_counts=True)))
+                    total = len(trainer.labels_data)
+                    trade_ratio = label_dist.get(1, 0) / total
+                    
+                    print(f"緩和ラベル分布:")
+                    print(f"  TRADE: {label_dist.get(1, 0):,} ({trade_ratio:.1%})")
+                    print(f"  NO_TRADE: {label_dist.get(0, 0):,} ({(1-trade_ratio):.1%})")
+                    
+                    if trade_ratio < 0.10:
+                        print(f"⚠️ まだTRADEが少ない: {trade_ratio:.1%}")
+                        
+                        # さらに緩和
+                        print("🔧 さらなる緩和適用...")
+                        trainer.labels_data = relaxed_labeler.create_adaptive_labels(trainer.features_data)
+                        
+                        # 再確認
+                        label_dist = dict(zip(*np.unique(trainer.labels_data, return_counts=True)))
+                        trade_ratio = label_dist.get(1, 0) / total
+                        print(f"  再緩和後TRADE: {label_dist.get(1, 0):,} ({trade_ratio:.1%})")
+                    
+                    if trade_ratio < 0.05:
+                        return {'error': 'still_insufficient_trade_signals', 'trade_ratio': trade_ratio}
+                    
+                    # データ分割
+                    train_features, train_labels, val_features, val_labels, test_features, test_labels = trainer.split_data_timeseries()
+                    
+                    # 緩和モデル学習
+                    train_results = trainer.train_model(
+                        train_features, train_labels,
+                        val_features, val_labels,
+                        epochs=epochs,
+                        batch_size=64
+                    )
+                    
+                    # 評価
+                    eval_results = trainer.evaluate_model(test_features, test_labels)
+                    
+                    # 結果表示
+                    trade_win_rate = eval_results.get('trade_win_rate', 0)
+                    profit_per_trade = eval_results.get('expected_profit_per_trade', 0)
+                    accuracy = eval_results.get('accuracy', 0)
+                    trade_signals = eval_results.get('trade_signals', 0)
+                    
+                    print(f"\n📊 {param_id} 結果:")
+                    print(f"  TRADE勝率: {trade_win_rate:.1%}")
+                    print(f"  利益/トレード: {profit_per_trade:+.2f}pips")
+                    print(f"  全体精度: {accuracy:.1%}")
+                    print(f"  TRADEシグナル数: {trade_signals}")
+                    
+                    return {
+                        'parameters': {'tp_pips': tp_pips, 'sl_pips': sl_pips, 'trade_threshold': trade_threshold},
+                        'eval_results': eval_results,
+                        'trade_ratio': trade_ratio,
+                        'success': True
+                    }
+                    
+                except Exception as e:
+                    print(f"❌ 緩和版でもエラー: {e}")
+                    return {'error': str(e)}
         
-        if emergency_result.get('recommendation') == 'use_relaxed_parameters':
-            print("💡 推奨: より緩い条件でPhase 2E再実行")
-        elif emergency_result.get('recommendation') == 'fundamental_review_needed':
-            print("🔧 推奨: 根本的なアプローチ見直しが必要")
+        # 緩和パラメータでグリッドサーチ
+        relaxed_optimizer = RelaxedParameterOptimizedTrainer(data_path, "phase2e_relaxed_results")
+        
+        # より緩いパラメータ範囲
+        relaxed_combinations = [
+            (3.0, 3.0, 0.40),  # 小さな利確・損切り、多めのTRADE
+            (3.0, 4.0, 0.35),
+            (4.0, 4.0, 0.35),
+            (4.0, 5.0, 0.30),
+            (5.0, 4.0, 0.30),
+            (5.0, 5.0, 0.25),
+        ]
+        
+        print(f"緩和グリッドサーチ: {len(relaxed_combinations)} 組み合わせ")
+        
+        relaxed_results = {}
+        best_profit = -999
+        best_param_id = None
+        successful_count = 0
+        
+        for i, (tp, sl, tr) in enumerate(relaxed_combinations):
+            print(f"\n🔄 緩和版進捗: {i+1}/{len(relaxed_combinations)}")
+            
+            result = relaxed_optimizer.train_single_parameter_set_relaxed(
+                tp_pips=tp, sl_pips=sl, trade_threshold=tr, epochs=20
+            )
+            
+            param_id = f"RELAXED_TP{tp}_SL{sl}_TR{tr:.2f}"
+            relaxed_results[param_id] = result
+            
+            if 'eval_results' in result:
+                successful_count += 1
+                profit = result['eval_results'].get('expected_profit_per_trade', -999)
+                
+                if profit > best_profit:
+                    best_profit = profit
+                    best_param_id = param_id
+                    print(f"🏆 緩和版ベスト: {param_id} = {profit:+.2f}pips")
+        
+        # 緩和版結果表示
+        print("\n" + "🔧" * 40)
+        print("    Phase 2E 緩和版結果")
+        print("🔧" * 40)
+        
+        print(f"{'パラメータ':<25} {'勝率':<8} {'利益':<12} {'シグナル':<8} {'状態':<8}")
+        print("-" * 75)
+        
+        for param_id, result in relaxed_results.items():
+            if 'eval_results' in result:
+                eval_res = result['eval_results']
+                win_rate = eval_res.get('trade_win_rate', 0)
+                profit = eval_res.get('expected_profit_per_trade', 0)
+                signals = eval_res.get('trade_signals', 0)
+                status = "成功"
+            else:
+                win_rate = 0
+                profit = 0
+                signals = 0
+                status = "失敗"
+            
+            print(f"{param_id:<25} {win_rate:.1%}   {profit:+.2f}pips   {signals:<8} {status:<8}")
+        
+        print(f"\n📊 緩和版成功率: {successful_count}/{len(relaxed_combinations)} ({successful_count/len(relaxed_combinations):.1%})")
+        
+        if best_param_id and best_profit > -999:
+            print(f"\n🥇 緩和版最優秀: {best_param_id}")
+            print(f"   利益: {best_profit:+.2f}pips/トレード")
+            
+            if best_profit > 0:
+                print("   🎉 ついに利益化達成！")
+            elif best_profit > -1.0:
+                print("   📈 大幅改善！微調整で利益化可能")
+            else:
+                print("   🔧 まだ改善が必要")
+        
+        print(f"\n🏁 Phase 2E 緩和版完了")
         
     except Exception as e:
-        print(f"緊急修正エラー: {e}")
+        print(f"Phase 2E緩和版エラー: {e}")
         import traceback
         traceback.print_exc()
 
