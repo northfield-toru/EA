@@ -1066,6 +1066,95 @@ def create_sample_labels(ohlcv_df: pd.DataFrame,
     
     return labels, analysis
 
+def create_realistic_profit_labels(df: pd.DataFrame, tp_pips=6, sl_pips=4, max_trade_ratio=0.35):
+    """
+    スキャルピングにおける現実的なTP/SLでのラベル生成
+    - tp_pips: 利益目標（pips）
+    - sl_pips: 損失許容（pips）
+    - max_trade_ratio: データのうち最大何％までをトレード対象にするか
+    """
+    df = df.copy()
+    df['label'] = 0  # 初期化（0 = no_trade）
+
+    tp = tp_pips * 0.01  # 例: 6pips -> 0.06円
+    sl = sl_pips * 0.01
+
+    n = len(df)
+    trade_indices = []
+
+    for i in range(n - 10):  # 10足後ろまで検証
+        entry_price = df.iloc[i]['close']
+        highs = df.iloc[i+1:i+11]['high']
+        lows = df.iloc[i+1:i+11]['low']
+
+        if highs.max() - entry_price >= tp:
+            trade_indices.append(i)
+        elif entry_price - lows.min() >= sl:
+            trade_indices.append(i)
+
+    # 過剰なトレードを避ける
+    max_trades = int(max_trade_ratio * n)
+    selected = trade_indices[:max_trades]
+    df.loc[selected, 'label'] = 1
+
+    return df
+
+def create_momentum_optimized_labels(df: pd.DataFrame, body_ratio=0.7, vol_multiplier=1.2):
+    """
+    モメンタム優位なローソク足を検出し、ラベルを付与（1 = トレード対象）
+    """
+    df = df.copy()
+    df['label'] = 0
+
+    body = abs(df['close'] - df['open'])
+    candle_range = df['high'] - df['low']
+    body_rate = body / candle_range
+
+    volume_ma = df['tick_volume'].rolling(20).mean()
+    is_momentum = (
+        (body_rate > body_ratio) &
+        (df['tick_volume'] > volume_ma * vol_multiplier)
+    )
+
+    df.loc[is_momentum, 'label'] = 1
+    return df
+
+def create_conservative_but_profitable_labels(df: pd.DataFrame, tp_pips=6, sl_pips=4, body_ratio=0.7, max_trade_ratio=0.2):
+    """
+    モメンタム強めなローソク足の中から、実際にTP/SLを達成できる位置だけに絞ったラベリング
+    """
+    df = df.copy()
+    df['label'] = 0
+
+    # まずモメンタムでフィルタ
+    body = abs(df['close'] - df['open'])
+    candle_range = df['high'] - df['low']
+    body_rate = body / candle_range
+    is_momentum = (body_rate > body_ratio)
+
+    candidate_indices = df[is_momentum].index.tolist()
+    n = len(df)
+    tp = tp_pips * 0.01
+    sl = sl_pips * 0.01
+
+    trade_indices = []
+
+    for i in candidate_indices:
+        if i + 10 >= n:
+            continue
+        entry = df.iloc[i]['close']
+        highs = df.iloc[i+1:i+11]['high']
+        lows = df.iloc[i+1:i+11]['low']
+
+        if highs.max() - entry >= tp or entry - lows.min() >= sl:
+            trade_indices.append(i)
+
+    # trade数を制限
+    max_trades = int(max_trade_ratio * n)
+    selected = trade_indices[:max_trades]
+    df.loc[selected, 'label'] = 1
+    return df
+
 
 if __name__ == "__main__":
     # テスト実行
