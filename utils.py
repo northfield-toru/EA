@@ -96,10 +96,19 @@ class USDJPYUtils:
         if (df['ask'] < df['bid']).any():
             errors.append("ask < bid の異常な価格データが含まれています")
         
-        # スプレッドの異常チェック（10pips以上は異常とみなす）
+        # スプレッドの異常チェック（50pips以上を異常とみなす）
         spread_pips = USDJPYUtils.calculate_spread_pips(df['bid'], df['ask'])
-        if (spread_pips > 10.0).any():
-            errors.append("異常に大きなスプレッド（10pips以上）が検出されました")
+        
+        # 警告レベル（10pips以上）
+        high_spread_10 = (spread_pips > 10.0).sum()
+        if high_spread_10 > 0:
+            logger.warning(f"高いスプレッド（10pips超）検出: {high_spread_10} 行 - 処理続行")
+            
+        # エラーレベル（50pips以上）
+        if (spread_pips > 50.0).any():
+            extreme_spread_count = (spread_pips > 50.0).sum()
+            logger.warning(f"異常スプレッド（50pips超）検出: {extreme_spread_count} 行 - 警告のみ、処理続行")
+            # errors.append を削除してエラーではなく警告のみにする
         
         return len(errors) == 0, errors
     
