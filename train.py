@@ -26,12 +26,13 @@ class ScalpingTrainer:
     def __init__(self, 
                  data_path: str,
                  sequence_length: int = 30,
-                 profit_pips: float = 8.0,
-                 loss_pips: float = 4.0,
+                 profit_pips: float = 6.0,      # 緩和: 8.0 → 6.0
+                 loss_pips: float = 6.0,        # 緩和: 4.0 → 6.0
                  lookforward_ticks: int = 100,
                  train_ratio: float = 0.7,
                  val_ratio: float = 0.15,
-                 test_ratio: float = 0.15):
+                 test_ratio: float = 0.15,
+                 use_binary_classification: bool = False):  # 2値分類オプション
         """
         Args:
             data_path: ティックデータパス
@@ -54,12 +55,16 @@ class ScalpingTrainer:
         self.train_ratio = train_ratio
         self.val_ratio = val_ratio
         self.test_ratio = test_ratio
+        self.use_binary_classification = use_binary_classification
         
-        # コンポーネント初期化
+        # コンポーネント初期化（柔軟条件版）
         self.utils = USDJPYUtils()
         self.loader = TickDataLoader()
         self.feature_engineer = FeatureEngineer()
-        self.labeler = ScalpingLabeler(profit_pips, loss_pips, lookforward_ticks)
+        self.labeler = ScalpingLabeler(
+            profit_pips, loss_pips, lookforward_ticks,
+            use_flexible_conditions=True  # 柔軟条件を使用
+        )
         
         # データ格納
         self.ohlcv_data = None
@@ -105,13 +110,23 @@ class ScalpingTrainer:
         
         print(f"特徴量数: {len(self.features_data.columns)}")
         
-        # 3. ラベル生成
+        # 3. ラベル生成（2値分類 or 3値分類）
         print("ラベル生成...")
-        self.labels_data = self.labeler.create_labels_vectorized(self.features_data)
+        if self.use_binary_classification:
+            self.labels_data = self.labeler.create_binary_labels_vectorized(self.features_data)
+            n_classes = 2
+            print("2値分類モード: TRADE vs NO_TRADE")
+        else:
+            self.labels_data = self.labeler.create_labels_vectorized(self.features_data)
+            n_classes = 3
+            print("3値分類モード: BUY vs SELL vs NO_TRADE")
         
-        # ラベル分布確認
-        label_dist = self.labels_data.value_counts().to_dict()
-        label_names = {0: 'NO_TRADE', 1: 'BUY', 2: 'SELL'}
+        # ラベル分布表示
+        if self.use_binary_classification:
+            label_names = {0: 'NO_TRADE', 1: 'TRADE'}
+        else:
+            label_names = {0: 'NO_TRADE', 1: 'BUY', 2: 'SELL'}
+        
         print("ラベル分布:")
         total = len(self.labels_data)
         for label_val, count in label_dist.items():
@@ -125,14 +140,7 @@ class ScalpingTrainer:
         self.features_data = self.features_data[complete_mask]
         self.labels_data = self.labels_data[complete_mask]
         
-        print(f"完全データ: {len(self.features_data)} 行 ({len(self.features_data)/total*100:.1f}%)")
-        
-        return {
-            'ohlcv_rows': len(self.ohlcv_data),
-            'feature_cols': len(self.features_data.columns),
-            'complete_rows': len(self.features_data),
-            'label_distribution': label_dist
-        }
+        print(f"完全データ: {len(self.features_data)} 行 ({len(self.features_data)/len(self.ohlcv_data)*100:.1f}%)")
     
     def split_data_timeseries(self) -> Tuple:
         """
@@ -506,6 +514,58 @@ class ScalpingTrainer:
             self.model.save_model(f"{output_dir}/model_{timestamp}.h5")
         
         print(f"結果保存完了: {output_dir}")
+
+
+def run_flexible_training_pipeline(data_path: str, 
+                                  sample_size: int = 500000,
+                                  epochs: int = 30,
+                                  batch_size: int = 64,
+                                  use_binary: bool = False) -> Dict:
+    """
+    柔軟条件での学習パイプライン実行
+    Args:
+        data_path: データパス
+        sample_size: サンプルサイズ
+        epochs: エポック数
+        batch_size: バッチサイズ
+        use_binary: 2値分類を使用するか
+    Returns:
+        dict: 全結果
+    """
+    print("=== USDJPY スキャルピングEA 柔軟条件学習パイプライン ===")
+    
+    # トレーナー初期化（柔軟条件）
+    trainer = ScalpingTrainer(data_path, use_binary_classification=use_binary)
+    
+    # データ準備
+    data_info = trainer.load_and_prepare_data(sample_size)
+    
+    # データ分割
+    train_features, train_labels, val_features, val_labels, test_features, test_labels = trainer.split_data_timeseries()
+    
+    # モデル学習
+    train_results = trainer.train_model(
+        train_features, train_labels,
+        val_features, val_labels,
+        epochs=epochs,
+        batch_size=batch_size
+    )
+    
+    # モデル評価
+    eval_results = trainer.evaluate_model(test_features, test_labels)
+    
+    # 結果統合
+    all_results = {
+        'data_info': data_info,
+        'train_results': train_results,
+        'eval_results': eval_results
+    }
+    
+    # 結果保存
+    trainer.save_results()
+    
+    print("=== 柔軟条件学習パイプライン完了 ===")
+    return all_results
 
 
 def run_full_training_pipeline(data_path: str, 

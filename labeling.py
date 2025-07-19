@@ -20,10 +20,11 @@ class ScalpingLabeler:
     """スキャルピング用ラベラー"""
     
     def __init__(self, 
-                 profit_pips: float = 8.0,
-                 loss_pips: float = 4.0, 
+                 profit_pips: float = 6.0,     # 緩和: 8.0 → 6.0
+                 loss_pips: float = 6.0,       # 緩和: 4.0 → 6.0  
                  lookforward_ticks: int = 100,
-                 spread_pips: float = 0.7):
+                 spread_pips: float = 0.7,
+                 use_flexible_conditions: bool = True):  # OR条件フラグ追加
         """
         Args:
             profit_pips: 利確目標pips
@@ -35,9 +36,11 @@ class ScalpingLabeler:
         self.loss_pips = loss_pips
         self.lookforward_ticks = lookforward_ticks
         self.spread_pips = spread_pips
+        self.use_flexible_conditions = use_flexible_conditions
         self.utils = USDJPYUtils()
         
-        logger.info(f"ラベル設定 - 利確:{profit_pips}pips, 損切:{loss_pips}pips, 前方参照:{lookforward_ticks}ティック")
+        condition_type = "柔軟(OR)" if use_flexible_conditions else "厳格(AND)"
+        logger.info(f"ラベル設定 - 利確:{profit_pips}pips, 損切:{loss_pips}pips, 前方参照:{lookforward_ticks}ティック, 条件:{condition_type}")
     
     def _calculate_future_extremes(self, prices: np.array, start_idx: int) -> Tuple[float, float]:
         """
@@ -62,7 +65,7 @@ class ScalpingLabeler:
     
     def _check_buy_condition(self, current_price: float, future_max: float, future_min: float) -> bool:
         """
-        BUY条件をチェック
+        BUY条件をチェック（柔軟条件対応版）
         Args:
             current_price: 現在価格（MID）
             future_max: 未来最高値
@@ -73,19 +76,24 @@ class ScalpingLabeler:
         # スプレッド調整（BUYはASK価格でエントリー）
         entry_price = current_price + self.utils.pips_to_price(self.spread_pips / 2)
         
-        # 利確条件：+8.0pips以上の上昇
+        # 利確条件：profit_pips以上の上昇
         profit_target = entry_price + self.utils.pips_to_price(self.profit_pips)
         profit_achieved = future_max >= profit_target
         
-        # 損切り条件：-4.0pips以上の逆行がない
+        # 損切り条件：loss_pips以上の逆行がない
         loss_threshold = entry_price - self.utils.pips_to_price(self.loss_pips)
         no_excessive_loss = future_min >= loss_threshold
         
-        return profit_achieved and no_excessive_loss
+        if self.use_flexible_conditions:
+            # OR条件：利確達成 または 損失が小さい
+            return profit_achieved or no_excessive_loss
+        else:
+            # AND条件：利確達成 かつ 損失が小さい（従来）
+            return profit_achieved and no_excessive_loss
     
     def _check_sell_condition(self, current_price: float, future_max: float, future_min: float) -> bool:
         """
-        SELL条件をチェック
+        SELL条件をチェック（柔軟条件対応版）
         Args:
             current_price: 現在価格（MID）
             future_max: 未来最高値
@@ -96,15 +104,20 @@ class ScalpingLabeler:
         # スプレッド調整（SELLはBID価格でエントリー）
         entry_price = current_price - self.utils.pips_to_price(self.spread_pips / 2)
         
-        # 利確条件：-8.0pips以上の下落
+        # 利確条件：profit_pips以上の下落
         profit_target = entry_price - self.utils.pips_to_price(self.profit_pips)
         profit_achieved = future_min <= profit_target
         
-        # 損切り条件：+4.0pips以上の逆行がない
+        # 損切り条件：loss_pips以上の逆行がない
         loss_threshold = entry_price + self.utils.pips_to_price(self.loss_pips)
         no_excessive_loss = future_max <= loss_threshold
         
-        return profit_achieved and no_excessive_loss
+        if self.use_flexible_conditions:
+            # OR条件：利確達成 または 損失が小さい
+            return profit_achieved or no_excessive_loss
+        else:
+            # AND条件：利確達成 かつ 損失が小さい（従来）
+            return profit_achieved and no_excessive_loss
     
     def create_labels_vectorized(self, df: pd.DataFrame, price_col: str = 'close') -> pd.Series:
         """
@@ -144,7 +157,43 @@ class ScalpingLabeler:
             percentage = count / total * 100
             logger.info(f"{label_name}: {count:,} ({percentage:.2f}%)")
         
-        return pd.Series(labels, index=df.index, name='label')
+    def create_binary_labels_vectorized(self, df: pd.DataFrame, price_col: str = 'close') -> pd.Series:
+        """
+        2値分類ラベル生成（TRADE vs NO_TRADE）
+        Args:
+            df: OHLCV DataFrame
+            price_col: 価格列名
+        Returns:
+            Series: ラベル（0=NO_TRADE, 1=TRADE）
+        """
+        logger.info(f"2値分類ラベル生成開始: {len(df)} 行")
+        
+        prices = df[price_col].values
+        labels = np.zeros(len(prices), dtype=int)  # 0=NO_TRADE
+        
+        # 各行について未来の極値を計算
+        for i in range(len(prices) - 1):  # 最後の行は未来データがないので除外
+            future_max, future_min = self._calculate_future_extremes(prices, i)
+            
+            # BUY または SELL条件のいずれかに合致すればTRADE
+            if (self._check_buy_condition(prices[i], future_max, future_min) or 
+                self._check_sell_condition(prices[i], future_max, future_min)):
+                labels[i] = 1  # TRADE
+            # それ以外はNO_TRADE（既に0で初期化済み）
+        
+        # ラベル統計
+        unique, counts = np.unique(labels, return_counts=True)
+        label_stats = dict(zip(unique, counts))
+        logger.info(f"2値分類ラベル統計: {label_stats}")
+        
+        # パーセンテージ表示
+        total = len(labels)
+        for label_val, count in label_stats.items():
+            label_name = ['NO_TRADE', 'TRADE'][label_val]
+            percentage = count / total * 100
+            logger.info(f"{label_name}: {count:,} ({percentage:.2f}%)")
+        
+        return pd.Series(labels, index=df.index, name='binary_label')
     
     def create_labels_parallel(self, df: pd.DataFrame, price_col: str = 'close', n_processes: Optional[int] = None) -> pd.Series:
         """
