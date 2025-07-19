@@ -13,6 +13,7 @@ import multiprocessing as mp
 
 from utils import USDJPYUtils
 
+# ロガー設定
 logger = logging.getLogger(__name__)
 
 class ScalpingLabeler:

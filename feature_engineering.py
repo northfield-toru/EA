@@ -13,6 +13,7 @@ from scipy import stats
 
 from utils import USDJPYUtils
 
+# ロガー設定
 logger = logging.getLogger(__name__)
 
 class TechnicalIndicators:
@@ -337,6 +338,14 @@ class FeatureEngineer:
         
         # 週末フラグ
         result_df['is_weekend'] = (result_df['weekday'] >= 5).astype(int)
+        
+        # 市場セッションを数値化
+        if 'market_session' in result_df.columns:
+            # 文字列を数値に変換
+            session_map = {'TOKYO': 0, 'LONDON': 1, 'NY': 2, 'OTHER': 3}
+            result_df['market_session_encoded'] = result_df['market_session'].map(session_map).fillna(3)
+            # 元の文字列列を削除
+            result_df = result_df.drop('market_session', axis=1)
         
         # 時間の循環特徴量（sin/cos エンコーディング）
         result_df['hour_sin'] = np.sin(2 * np.pi * result_df['hour'] / 24)

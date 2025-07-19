@@ -5,7 +5,7 @@ CNN + LSTM ハイブリッドアーキテクチャ
 """
 
 import tensorflow as tf
-from tensorflow.keras import layers, models, optimizers, callbacks
+from tensorflow.keras import layers, models, optimizers, callbacks, metrics
 from tensorflow.keras.utils import to_categorical
 import numpy as np
 import pandas as pd
@@ -197,7 +197,11 @@ class ScalpingCNNLSTM:
         model.compile(
             optimizer=optimizers.Adam(learning_rate=self.learning_rate),
             loss='categorical_crossentropy',
-            metrics=['accuracy', 'precision', 'recall']
+            metrics=[
+                'accuracy',
+                metrics.Precision(name='precision'),
+                metrics.Recall(name='recall')
+            ]
         )
         
         self.model = model
@@ -218,8 +222,18 @@ class ScalpingCNNLSTM:
         """
         print(f"シーケンス準備開始: {len(features_df)} 行")
         
+        # 数値型列のみ選択（文字列型列を除外）
+        numeric_columns = features_df.select_dtypes(include=[np.number]).columns
+        features_numeric = features_df[numeric_columns].copy()
+        
+        print(f"数値特徴量: {len(numeric_columns)} 列")
+        
         # 欠損値処理
-        features_clean = features_df.fillna(method='ffill').fillna(method='bfill')
+        features_clean = features_numeric.fillna(method='ffill').fillna(method='bfill')
+        
+        # 無限値を除去
+        features_clean = features_clean.replace([np.inf, -np.inf], np.nan)
+        features_clean = features_clean.fillna(0)
         
         # 特徴量スケーリング
         if self.scaler is None:
