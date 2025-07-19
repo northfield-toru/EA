@@ -20,10 +20,10 @@ class ScalpingCNNLSTM:
                  sequence_length: int = 30,
                  n_features: int = 87,
                  n_classes: int = 3,
-                 cnn_filters: list = [32, 64, 128],
-                 kernel_sizes: list = [3, 5, 7],
-                 lstm_units: int = 64,
-                 dropout_rate: float = 0.3,
+                 cnn_filters: list = [16, 32],  # 軽量化: [32,64,128] → [16,32]
+                 kernel_sizes: list = [3, 5],  # 軽量化: [3,5,7] → [3,5]
+                 lstm_units: int = 32,         # 軽量化: 64 → 32
+                 dropout_rate: float = 0.5,    # 強化: 0.3 → 0.5
                  learning_rate: float = 0.001):
         """
         Args:
@@ -163,21 +163,18 @@ class ScalpingCNNLSTM:
         # Attention機構
         attended_output = self._build_attention_layer(lstm_output)
         
-        # 全結合層
+        # 全結合層（軽量化）
         dense_output = layers.Dense(
-            128,
+            32,  # 軽量化: 128 → 32
             activation='relu',
+            kernel_regularizer=tf.keras.regularizers.l2(0.001),  # L2正則化追加
             name='dense_1'
         )(attended_output)
         
         dense_output = layers.BatchNormalization(name='bn_dense')(dense_output)
         dense_output = layers.Dropout(self.dropout_rate, name='dropout_dense')(dense_output)
         
-        dense_output = layers.Dense(
-            64,
-            activation='relu',
-            name='dense_2'
-        )(dense_output)
+        # 中間層削除で軽量化
         
         # 出力層（3クラス分類）
         output_layer = layers.Dense(
@@ -275,12 +272,13 @@ class ScalpingCNNLSTM:
     
     def calculate_class_weights(self, y: np.array) -> Dict:
         """
-        クラス重み計算（不均衡データ対策）
+        クラス重み計算（不均衡データ対策強化版）
         Args:
             y: ラベル配列
         Returns:
             dict: クラス重み
         """
+        # 基本的なbalanced重み
         class_weights = compute_class_weight(
             'balanced',
             classes=np.unique(y),
@@ -289,15 +287,28 @@ class ScalpingCNNLSTM:
         
         class_weight_dict = dict(zip(np.unique(y), class_weights))
         
-        print(f"クラス重み: {class_weight_dict}")
-        self.class_weights = class_weight_dict
+        # 極端な不均衡の場合、追加調整
+        label_counts = np.bincount(y)
+        max_count = np.max(label_counts)
+        min_count = np.min(label_counts[label_counts > 0])
         
+        # 不均衡比が10:1以上の場合、少数クラスをさらに強化
+        if max_count / min_count > 10:
+            for class_idx, count in enumerate(label_counts):
+                if count > 0 and count == min_count:
+                    class_weight_dict[class_idx] *= 1.5  # 1.5倍強化
+                    print(f"極端不均衡検出: クラス{class_idx}の重みを{class_weight_dict[class_idx]:.2f}に強化")
+        
+        print(f"最終クラス重み: {class_weight_dict}")
+        print(f"クラス分布: {dict(zip(range(len(label_counts)), label_counts))}")
+        
+        self.class_weights = class_weight_dict
         return class_weight_dict
     
     def get_callbacks(self, 
                      model_save_path: str = 'best_model.h5',
-                     patience: int = 10,
-                     reduce_lr_patience: int = 5) -> list:
+                     patience: int = 5,        # 厳格化: 10 → 5
+                     reduce_lr_patience: int = 3) -> list:  # 厳格化: 5 → 3
         """
         学習用コールバック設定
         Args:
@@ -434,27 +445,35 @@ class FocalLoss:
         return tf.reduce_mean(tf.reduce_sum(focal_loss, axis=1))
 
 
-def create_sample_model(sequence_length: int = 30, n_features: int = 87) -> ScalpingCNNLSTM:
+def create_light_model(sequence_length: int = 30, n_features: int = 87) -> ScalpingCNNLSTM:
     """
-    サンプルモデル作成
+    軽量化スキャルピングモデル作成（過学習対策版）
     Args:
         sequence_length: 時系列長
         n_features: 特徴量数
     Returns:
-        ScalpingCNNLSTM: モデルインスタンス
+        ScalpingCNNLSTM: 軽量化モデルインスタンス
     """
     model = ScalpingCNNLSTM(
         sequence_length=sequence_length,
         n_features=n_features,
-        cnn_filters=[32, 64, 128],
-        kernel_sizes=[3, 5, 7],
-        lstm_units=64,
-        dropout_rate=0.3,
+        cnn_filters=[16, 32],      # 軽量化
+        kernel_sizes=[3, 5],       # 軽量化
+        lstm_units=32,             # 軽量化
+        dropout_rate=0.5,          # 強化
         learning_rate=0.001
     )
     
     model.build_model()
+    print(f"軽量化モデル作成完了 - パラメータ数: {model.model.count_params():,}")
     return model
+
+
+def create_sample_model(sequence_length: int = 30, n_features: int = 87) -> ScalpingCNNLSTM:
+    """
+    サンプルモデル作成（軽量化版にリダイレクト）
+    """
+    return create_light_model(sequence_length, n_features)
 
 
 if __name__ == "__main__":

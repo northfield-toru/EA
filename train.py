@@ -192,12 +192,17 @@ class ScalpingTrainer:
         """
         print("=== モデル学習開始 ===")
         
-        # モデル初期化
+        # モデル初期化（軽量化版使用）
         n_features = len(train_features.columns)
         self.model = ScalpingCNNLSTM(
             sequence_length=self.sequence_length,
             n_features=n_features,
-            n_classes=3
+            n_classes=3,
+            cnn_filters=[16, 32],      # 軽量化
+            kernel_sizes=[3, 5],       # 軽量化  
+            lstm_units=32,             # 軽量化
+            dropout_rate=0.5,          # 強化
+            learning_rate=0.001
         )
         
         # シーケンスデータ準備
@@ -504,8 +509,8 @@ class ScalpingTrainer:
 
 
 def run_full_training_pipeline(data_path: str, 
-                              sample_size: int = None,
-                              epochs: int = 100,
+                              sample_size: int = 500000,  # 増量: 100000 → 500000
+                              epochs: int = 50,           # 増加: 100 → 50（早期停止で制御）
                               batch_size: int = 64) -> Dict:
     """
     完全な学習パイプライン実行
@@ -558,7 +563,7 @@ if __name__ == "__main__":
     import sys
     
     data_path = "data/usdjpy_ticks.csv" if len(sys.argv) < 2 else sys.argv[1]
-    sample_size = 100000  # テスト用サンプルサイズ
+    sample_size = 500000  # 増量: テスト用サンプルサイズ
     
     print("=== 学習パイプライン テスト実行 ===")
     
@@ -566,7 +571,7 @@ if __name__ == "__main__":
         results = run_full_training_pipeline(
             data_path=data_path,
             sample_size=sample_size,
-            epochs=20,  # テスト用に短縮
+            epochs=30,  # 軽量化テスト用
             batch_size=64
         )
         
