@@ -57,13 +57,13 @@ class ScalpingTrainer:
         self.test_ratio = test_ratio
         self.use_binary_classification = use_binary_classification
         
-        # コンポーネント初期化（柔軟条件版）
+        # コンポーネント初期化（ChatGPT提案の緩和条件）
         self.utils = USDJPYUtils()
         self.loader = TickDataLoader()
         self.feature_engineer = FeatureEngineer()
         self.labeler = ScalpingLabeler(
             profit_pips, loss_pips, lookforward_ticks,
-            use_flexible_conditions=True  # 柔軟条件を使用
+            use_or_conditions=True  # ChatGPT提案: OR条件使用
         )
         
         # データ格納
@@ -571,7 +571,8 @@ def run_flexible_training_pipeline(data_path: str,
 def run_full_training_pipeline(data_path: str, 
                               sample_size: int = 500000,  # 増量: 100000 → 500000
                               epochs: int = 50,           # 増加: 100 → 50（早期停止で制御）
-                              batch_size: int = 64) -> Dict:
+                              batch_size: int = 64,
+                              use_binary: bool = True) -> Dict:  # デフォルトを2値分類に変更
     """
     完全な学習パイプライン実行
     Args:
@@ -579,13 +580,14 @@ def run_full_training_pipeline(data_path: str,
         sample_size: サンプルサイズ
         epochs: エポック数
         batch_size: バッチサイズ
+        use_binary: 2値分類を使用するか
     Returns:
         dict: 全結果
     """
     print("=== USDJPY スキャルピングEA 完全学習パイプライン ===")
     
-    # トレーナー初期化
-    trainer = ScalpingTrainer(data_path)
+    # トレーナー初期化（2値分類デフォルト）
+    trainer = ScalpingTrainer(data_path, use_binary_classification=use_binary)
     
     # データ準備
     data_info = trainer.load_and_prepare_data(sample_size)

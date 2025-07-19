@@ -445,35 +445,42 @@ class FocalLoss:
         return tf.reduce_mean(tf.reduce_sum(focal_loss, axis=1))
 
 
-def create_light_model(sequence_length: int = 30, n_features: int = 87) -> ScalpingCNNLSTM:
+def create_lightweight_model(sequence_length: int = 30, n_features: int = 87, n_classes: int = 2) -> ScalpingCNNLSTM:
     """
-    軽量化スキャルピングモデル作成（過学習対策版）
+    ChatGPT提案の軽量化モデル
     Args:
         sequence_length: 時系列長
         n_features: 特徴量数
+        n_classes: クラス数（2=TRADE/NO_TRADE, 3=BUY/SELL/NO_TRADE）
     Returns:
-        ScalpingCNNLSTM: 軽量化モデルインスタンス
+        ScalpingCNNLSTM: 軽量モデル
     """
     model = ScalpingCNNLSTM(
         sequence_length=sequence_length,
         n_features=n_features,
-        cnn_filters=[16, 32],      # 軽量化
-        kernel_sizes=[3, 5],       # 軽量化
-        lstm_units=32,             # 軽量化
-        dropout_rate=0.5,          # 強化
+        n_classes=n_classes,
+        cnn_filters=[16, 32],      # 軽量化（元: [32,64,128]）
+        kernel_sizes=[3, 5],       # 軽量化（元: [3,5,7]）
+        lstm_units=32,             # 軽量化（元: 64）
+        dropout_rate=0.5,          # 強化（元: 0.3）
         learning_rate=0.001
     )
     
     model.build_model()
-    print(f"軽量化モデル作成完了 - パラメータ数: {model.model.count_params():,}")
+    
+    # パラメータ数表示
+    param_count = model.model.count_params()
+    print(f"軽量モデル構築完了")
+    print(f"  パラメータ数: {param_count:,} （目標: 100K以下）")
+    print(f"  クラス数: {n_classes}")
+    print(f"  ドロップアウト率: {model.dropout_rate}")
+    
     return model
 
 
 def create_sample_model(sequence_length: int = 30, n_features: int = 87) -> ScalpingCNNLSTM:
-    """
-    サンプルモデル作成（軽量化版にリダイレクト）
-    """
-    return create_light_model(sequence_length, n_features)
+    """軽量モデルにリダイレクト"""
+    return create_lightweight_model(sequence_length, n_features, n_classes=2)
 
 
 if __name__ == "__main__":

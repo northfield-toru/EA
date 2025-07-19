@@ -20,27 +20,28 @@ class ScalpingLabeler:
     """スキャルピング用ラベラー"""
     
     def __init__(self, 
-                 profit_pips: float = 6.0,     # 緩和: 8.0 → 6.0
-                 loss_pips: float = 6.0,       # 緩和: 4.0 → 6.0  
+                 profit_pips: float = 6.0,     # ChatGPT提案: 8.0 → 6.0
+                 loss_pips: float = 6.0,       # ChatGPT提案: 4.0 → 6.0  
                  lookforward_ticks: int = 100,
                  spread_pips: float = 0.7,
-                 use_flexible_conditions: bool = True):  # OR条件フラグ追加
+                 use_or_conditions: bool = True):  # ChatGPT提案: OR条件をデフォルト
         """
         Args:
             profit_pips: 利確目標pips
             loss_pips: 損切りpips
             lookforward_ticks: 未来参照ティック数
             spread_pips: スプレッド（pips）
+            use_or_conditions: OR条件を使用するか（True=緩和, False=厳格）
         """
         self.profit_pips = profit_pips
         self.loss_pips = loss_pips
         self.lookforward_ticks = lookforward_ticks
         self.spread_pips = spread_pips
-        self.use_flexible_conditions = use_flexible_conditions
+        self.use_or_conditions = use_or_conditions
         self.utils = USDJPYUtils()
         
-        condition_type = "柔軟(OR)" if use_flexible_conditions else "厳格(AND)"
-        logger.info(f"ラベル設定 - 利確:{profit_pips}pips, 損切:{loss_pips}pips, 前方参照:{lookforward_ticks}ティック, 条件:{condition_type}")
+        condition_type = "OR条件(緩和)" if use_or_conditions else "AND条件(厳格)"
+        logger.info(f"ラベル設定 - 利確:{profit_pips}pips, 損切:{loss_pips}pips, 前方参照:{lookforward_ticks}ティック, {condition_type}")
     
     def _calculate_future_extremes(self, prices: np.array, start_idx: int) -> Tuple[float, float]:
         """
@@ -91,33 +92,42 @@ class ScalpingLabeler:
             # AND条件：利確達成 かつ 損失が小さい（従来）
             return profit_achieved and no_excessive_loss
     
-    def _check_sell_condition(self, current_price: float, future_max: float, future_min: float) -> bool:
+    def _check_trade_condition(self, current_price: float, future_max: float, future_min: float) -> bool:
         """
-        SELL条件をチェック（柔軟条件対応版）
+        TRADE条件をチェック（2値分類用・ChatGPT提案のOR条件）
         Args:
             current_price: 現在価格（MID）
             future_max: 未来最高値
             future_min: 未来最安値
         Returns:
-            bool: SELL条件に合致するか
+            bool: TRADE条件に合致するか
         """
-        # スプレッド調整（SELLはBID価格でエントリー）
-        entry_price = current_price - self.utils.pips_to_price(self.spread_pips / 2)
+        # BUY方向の判定
+        buy_entry = current_price + self.utils.pips_to_price(self.spread_pips / 2)
+        buy_profit_target = buy_entry + self.utils.pips_to_price(self.profit_pips)
+        buy_loss_threshold = buy_entry - self.utils.pips_to_price(self.loss_pips)
         
-        # 利確条件：profit_pips以上の下落
-        profit_target = entry_price - self.utils.pips_to_price(self.profit_pips)
-        profit_achieved = future_min <= profit_target
+        buy_profit_achieved = future_max >= buy_profit_target
+        buy_loss_acceptable = future_min >= buy_loss_threshold
         
-        # 損切り条件：loss_pips以上の逆行がない
-        loss_threshold = entry_price + self.utils.pips_to_price(self.loss_pips)
-        no_excessive_loss = future_max <= loss_threshold
+        # SELL方向の判定
+        sell_entry = current_price - self.utils.pips_to_price(self.spread_pips / 2)
+        sell_profit_target = sell_entry - self.utils.pips_to_price(self.profit_pips)
+        sell_loss_threshold = sell_entry + self.utils.pips_to_price(self.loss_pips)
         
-        if self.use_flexible_conditions:
-            # OR条件：利確達成 または 損失が小さい
-            return profit_achieved or no_excessive_loss
+        sell_profit_achieved = future_min <= sell_profit_target
+        sell_loss_acceptable = future_max <= sell_loss_threshold
+        
+        if self.use_or_conditions:
+            # OR条件: BUY/SELLいずれかで（利確達成 OR 損失許容範囲）
+            buy_viable = buy_profit_achieved or buy_loss_acceptable
+            sell_viable = sell_profit_achieved or sell_loss_acceptable
+            return buy_viable or sell_viable
         else:
-            # AND条件：利確達成 かつ 損失が小さい（従来）
-            return profit_achieved and no_excessive_loss
+            # AND条件: BUY/SELLいずれかで（利確達成 AND 損失許容範囲）
+            buy_viable = buy_profit_achieved and buy_loss_acceptable
+            sell_viable = sell_profit_achieved and sell_loss_acceptable
+            return buy_viable or sell_viable
     
     def create_labels_vectorized(self, df: pd.DataFrame, price_col: str = 'close') -> pd.Series:
         """
@@ -168,32 +178,60 @@ class ScalpingLabeler:
         """
         logger.info(f"2値分類ラベル生成開始: {len(df)} 行")
         
-        prices = df[price_col].values
-        labels = np.zeros(len(prices), dtype=int)  # 0=NO_TRADE
+        if len(df) == 0:
+            logger.error("空のDataFrameが渡されました")
+            return pd.Series([], dtype=int, name='binary_label')
         
-        # 各行について未来の極値を計算
-        for i in range(len(prices) - 1):  # 最後の行は未来データがないので除外
-            future_max, future_min = self._calculate_future_extremes(prices, i)
+        if price_col not in df.columns:
+            logger.error(f"価格列 '{price_col}' が見つかりません")
+            return pd.Series([], dtype=int, name='binary_label')
+        
+        try:
+            prices = df[price_col].values
+            labels = np.zeros(len(prices), dtype=int)  # 0=NO_TRADE
             
-            # BUY または SELL条件のいずれかに合致すればTRADE
-            if (self._check_buy_condition(prices[i], future_max, future_min) or 
-                self._check_sell_condition(prices[i], future_max, future_min)):
-                labels[i] = 1  # TRADE
-            # それ以外はNO_TRADE（既に0で初期化済み）
-        
-        # ラベル統計
-        unique, counts = np.unique(labels, return_counts=True)
-        label_stats = dict(zip(unique, counts))
-        logger.info(f"2値分類ラベル統計: {label_stats}")
-        
-        # パーセンテージ表示
-        total = len(labels)
-        for label_val, count in label_stats.items():
-            label_name = ['NO_TRADE', 'TRADE'][label_val]
-            percentage = count / total * 100
-            logger.info(f"{label_name}: {count:,} ({percentage:.2f}%)")
-        
-        return pd.Series(labels, index=df.index, name='binary_label')
+            # 各行について未来の極値を計算
+            processed_count = 0
+            for i in range(len(prices) - 1):  # 最後の行は未来データがないので除外
+                try:
+                    future_max, future_min = self._calculate_future_extremes(prices, i)
+                    
+                    # BUY または SELL条件のいずれかに合致すればTRADE
+                    if (self._check_buy_condition(prices[i], future_max, future_min) or 
+                        self._check_sell_condition(prices[i], future_max, future_min)):
+                        labels[i] = 1  # TRADE
+                    # それ以外はNO_TRADE（既に0で初期化済み）
+                    
+                    processed_count += 1
+                    
+                    # 進捗表示（10万行ごと）
+                    if processed_count % 100000 == 0:
+                        logger.info(f"処理中... {processed_count:,} / {len(prices)-1:,} 行")
+                        
+                except Exception as e:
+                    if processed_count < 10:  # 最初の10個のエラーのみ表示
+                        logger.warning(f"行 {i} の処理でエラー: {e}")
+                    continue
+            
+            # ラベル統計
+            unique, counts = np.unique(labels, return_counts=True)
+            label_stats = dict(zip(unique, counts))
+            logger.info(f"2値分類ラベル統計: {label_stats}")
+            
+            # パーセンテージ表示
+            total = len(labels)
+            for label_val, count in label_stats.items():
+                label_name = ['NO_TRADE', 'TRADE'][label_val]
+                percentage = count / total * 100
+                logger.info(f"{label_name}: {count:,} ({percentage:.2f}%)")
+            
+            result = pd.Series(labels, index=df.index, name='binary_label')
+            logger.info(f"2値分類ラベル生成完了: {len(result)} 行")
+            return result
+            
+        except Exception as e:
+            logger.error(f"2値分類ラベル生成でエラー: {e}")
+            return pd.Series([], dtype=int, name='binary_label')
     
     def create_labels_parallel(self, df: pd.DataFrame, price_col: str = 'close', n_processes: Optional[int] = None) -> pd.Series:
         """
