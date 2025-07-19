@@ -1031,107 +1031,349 @@ def run_balanced_training_pipeline(data_path: str, approach: str = "relaxed") ->
         
         return trainer  # 簡略化
 
-def run_phase2a_profit_focused_pipeline(data_path: str, 
-                                       approach: str = "profit_focused",
-                                       sample_size: int = 500000,
-                                       epochs: int = 40) -> Dict:
+def run_phase2b_realistic_pipeline(data_path: str, 
+                                  tp_pips: float = 6.0,
+                                  sl_pips: float = 4.0,
+                                  sample_size: int = 500000,
+                                  epochs: int = 35) -> Dict:
     """
-    Phase 2A: 勝率重視学習パイプライン実行
-    Args:
-        data_path: データパス
-        approach: "profit_focused" or "ultra_conservative"
-        sample_size: サンプルサイズ
-        epochs: エポック数
-    Returns:
-        dict: 全結果
+    Phase 2B: 現実的利益パイプライン実行
     """
     print("=" * 60)
-    print(f"    Phase 2A: {approach.upper()} パイプライン")
-    print("    目標: 勝率60-80%, 利益+3〜10pips/トレード")
+    print("    Phase 2B: REALISTIC PROFIT パイプライン")
+    print(f"    設定: TP={tp_pips}pips, SL={sl_pips}pips")
+    print("    目標: 勝率55-65%, 利益+1〜3pips/トレード")
     print("=" * 60)
     
-    # Phase 2A専用トレーナー初期化
-    trainer = ScalpingTrainer(
-        data_path,
-        use_binary_classification=True  # 2値分類継続
+    # トレーナー初期化
+    trainer = ScalpingTrainer(data_path, use_binary_classification=True)
+    
+    # データ読み込み・特徴量生成
+    if sample_size:
+        trainer.ohlcv_data = load_sample_data(data_path, sample_size)
+    else:
+        tick_data = trainer.loader.load_tick_data_auto(data_path)
+        trainer.ohlcv_data = trainer.loader.tick_to_ohlcv_1min(tick_data)
+    
+    trainer.features_data = trainer.feature_engineer.create_all_features(
+        trainer.ohlcv_data, include_advanced=True, include_lags=True
     )
     
-    # Phase 2Aデータ準備
-    data_info = trainer.load_and_prepare_data_phase2a(sample_size, approach)
+    # Phase 2B現実的ラベル生成
+    print(f"Phase 2B 現実的ラベル生成...")
+    realistic_labeler = ScalpingLabeler(
+        profit_pips=tp_pips,
+        loss_pips=sl_pips,
+        lookforward_ticks=80,
+        use_or_conditions=False
+    )
     
-    # 事前評価
-    trade_ratio = data_info['trade_ratio']
-    if trade_ratio < 0.05:
-        print("⚠️ 警告: TRADEシグナルが5%未満です。学習が困難な可能性があります")
-        print("💡 提案: ultra_conservativeではなくprofit_focusedを試すか、条件を緩和してください")
-    elif trade_ratio > 0.40:
-        print("⚠️ 警告: TRADEシグナルが40%超です。より厳格化を検討してください")
+    trainer.labels_data = realistic_labeler.create_realistic_profit_labels(
+        trainer.features_data, tp_pips=tp_pips, sl_pips=sl_pips
+    )
     
-    # データ分割
+    # データクリーニング・分割
+    complete_mask = ~(trainer.features_data.isna().any(axis=1) | trainer.labels_data.isna())
+    trainer.features_data = trainer.features_data[complete_mask]
+    trainer.labels_data = trainer.labels_data[complete_mask]
+    
     train_features, train_labels, val_features, val_labels, test_features, test_labels = trainer.split_data_timeseries()
     
-    # モデル学習（少し長めのエポック）
-    train_results = trainer.train_model(
-        train_features, train_labels,
-        val_features, val_labels,
-        epochs=epochs,
-        batch_size=64
-    )
-    
-    # モデル評価
+    # モデル学習・評価
+    train_results = trainer.train_model(train_features, train_labels, val_features, val_labels, epochs=epochs)
     eval_results = trainer.evaluate_model(test_features, test_labels)
     
-    # Phase 2A結果分析
-    print("\n" + "=" * 60)
-    print("           Phase 2A 結果分析")
-    print("=" * 60)
+    # 結果分析
+    print("\n" + "=" * 50)
+    print("   Phase 2B REALISTIC 結果分析")
+    print("=" * 50)
     
     trade_win_rate = eval_results.get('trade_win_rate', 0)
     profit_per_trade = eval_results.get('expected_profit_per_trade', 0)
     accuracy = eval_results.get('accuracy', 0)
     
-    print(f"📊 核心指標:")
-    print(f"  TRADE勝率: {trade_win_rate:.1%} (目標: 60-80%)")
-    print(f"  利益/トレード: {profit_per_trade:+.2f}pips (目標: +3〜10pips)")
+    print(f"🎯 現実的指標:")
+    print(f"  TRADE勝率: {trade_win_rate:.1%}")
+    print(f"  利益/トレード: {profit_per_trade:+.2f}pips")
     print(f"  全体精度: {accuracy:.1%}")
-    print(f"  アプローチ: {approach}")
     
-    # 成功判定
-    success_criteria = {
-        'win_rate_ok': trade_win_rate >= 0.60,
-        'profit_ok': profit_per_trade >= 2.0,
-        'accuracy_ok': accuracy >= 0.55
-    }
-    
-    success_count = sum(success_criteria.values())
-    
-    if success_count >= 2:
-        print("✅ Phase 2A 成功！実用レベルに到達")
-    elif success_count == 1:
-        print("🔄 Phase 2A 部分成功。微調整で改善可能")
-    else:
-        print("⚠️ Phase 2A 要改善。アプローチ変更を検討")
-    
-    # 結果統合
-    all_results = {
-        'phase': '2A',
-        'approach': approach,
-        'data_info': data_info,
-        'train_results': train_results,
-        'eval_results': eval_results,
-        'success_criteria': success_criteria,
-        'success_score': f"{success_count}/3",
-        'recommendations': _generate_phase2a_recommendations(eval_results, approach)
-    }
-    
-    # 結果保存
     trainer.save_results()
     
+    return {
+        'phase': '2B_realistic',
+        'approach': 'realistic_profit',
+        'params': {'tp_pips': tp_pips, 'sl_pips': sl_pips},
+        'eval_results': eval_results,
+        'train_results': train_results
+    }
+
+def run_phase2b_momentum_pipeline(data_path: str,
+                                 body_ratio: float = 0.7,
+                                 min_body_pips: float = 4.0,
+                                 sample_size: int = 500000,
+                                 epochs: int = 35) -> Dict:
+    """
+    Phase 2B: モメンタム最適化パイプライン実行
+    """
     print("=" * 60)
-    print("           Phase 2A パイプライン完了")
+    print("    Phase 2B: MOMENTUM OPTIMIZED パイプライン")
+    print(f"    設定: 実体比率={body_ratio}, 最小実体={min_body_pips}pips")
+    print("    目標: 強いトレンドの初動を捉える")
     print("=" * 60)
     
-    return all_results
+    # トレーナー初期化
+    trainer = ScalpingTrainer(data_path, use_binary_classification=True)
+    
+    # データ読み込み・特徴量生成
+    if sample_size:
+        trainer.ohlcv_data = load_sample_data(data_path, sample_size)
+    else:
+        tick_data = trainer.loader.load_tick_data_auto(data_path)
+        trainer.ohlcv_data = trainer.loader.tick_to_ohlcv_1min(tick_data)
+    
+    trainer.features_data = trainer.feature_engineer.create_all_features(
+        trainer.ohlcv_data, include_advanced=True, include_lags=True
+    )
+    
+    # Phase 2Bモメンタムラベル生成
+    print(f"Phase 2B モメンタムラベル生成...")
+    momentum_labeler = ScalpingLabeler(
+        profit_pips=6.0,
+        loss_pips=4.0,
+        lookforward_ticks=80,
+        use_or_conditions=False
+    )
+    
+    trainer.labels_data = momentum_labeler.create_momentum_optimized_labels(
+        trainer.features_data, body_ratio=body_ratio, min_body_pips=min_body_pips
+    )
+    
+    # データクリーニング・分割
+    complete_mask = ~(trainer.features_data.isna().any(axis=1) | trainer.labels_data.isna())
+    trainer.features_data = trainer.features_data[complete_mask]
+    trainer.labels_data = trainer.labels_data[complete_mask]
+    
+    train_features, train_labels, val_features, val_labels, test_features, test_labels = trainer.split_data_timeseries()
+    
+    # モデル学習・評価
+    train_results = trainer.train_model(train_features, train_labels, val_features, val_labels, epochs=epochs)
+    eval_results = trainer.evaluate_model(test_features, test_labels)
+    
+    # 結果分析
+    print("\n" + "=" * 50)
+    print("   Phase 2B MOMENTUM 結果分析")
+    print("=" * 50)
+    
+    trade_win_rate = eval_results.get('trade_win_rate', 0)
+    profit_per_trade = eval_results.get('expected_profit_per_trade', 0)
+    accuracy = eval_results.get('accuracy', 0)
+    
+    print(f"📈 モメンタム指標:")
+    print(f"  TRADE勝率: {trade_win_rate:.1%}")
+    print(f"  利益/トレード: {profit_per_trade:+.2f}pips")
+    print(f"  全体精度: {accuracy:.1%}")
+    
+    trainer.save_results()
+    
+    return {
+        'phase': '2B_momentum',
+        'approach': 'momentum_optimized',
+        'params': {'body_ratio': body_ratio, 'min_body_pips': min_body_pips},
+        'eval_results': eval_results,
+        'train_results': train_results
+    }
+
+def run_phase2b_conservative_pipeline(data_path: str,
+                                     tp_pips: float = 5.0,
+                                     sl_pips: float = 4.0,
+                                     max_trade_ratio: float = 0.35,
+                                     sample_size: int = 500000,
+                                     epochs: int = 35) -> Dict:
+    """
+    Phase 2B: 保守的利益パイプライン実行
+    """
+    print("=" * 60)
+    print("    Phase 2B: CONSERVATIVE PROFITABLE パイプライン")
+    print(f"    設定: TP={tp_pips}pips, SL={sl_pips}pips, 最大TRADE={max_trade_ratio:.1%}")
+    print("    目標: 高品質シグナルのみを厳選")
+    print("=" * 60)
+    
+    # トレーナー初期化
+    trainer = ScalpingTrainer(data_path, use_binary_classification=True)
+    
+    # データ読み込み・特徴量生成
+    if sample_size:
+        trainer.ohlcv_data = load_sample_data(data_path, sample_size)
+    else:
+        tick_data = trainer.loader.load_tick_data_auto(data_path)
+        trainer.ohlcv_data = trainer.loader.tick_to_ohlcv_1min(tick_data)
+    
+    trainer.features_data = trainer.feature_engineer.create_all_features(
+        trainer.ohlcv_data, include_advanced=True, include_lags=True
+    )
+    
+    # Phase 2B保守的ラベル生成
+    print(f"Phase 2B 保守的ラベル生成...")
+    conservative_labeler = ScalpingLabeler(
+        profit_pips=tp_pips,
+        loss_pips=sl_pips,
+        lookforward_ticks=80,
+        use_or_conditions=False
+    )
+    
+    trainer.labels_data = conservative_labeler.create_conservative_but_profitable_labels(
+        trainer.features_data, tp_pips=tp_pips, sl_pips=sl_pips, max_trade_ratio=max_trade_ratio
+    )
+    
+    # データクリーニング・分割
+    complete_mask = ~(trainer.features_data.isna().any(axis=1) | trainer.labels_data.isna())
+    trainer.features_data = trainer.features_data[complete_mask]
+    trainer.labels_data = trainer.labels_data[complete_mask]
+    
+    train_features, train_labels, val_features, val_labels, test_features, test_labels = trainer.split_data_timeseries()
+    
+    # モデル学習・評価
+    train_results = trainer.train_model(train_features, train_labels, val_features, val_labels, epochs=epochs)
+    eval_results = trainer.evaluate_model(test_features, test_labels)
+    
+    # 結果分析
+    print("\n" + "=" * 50)
+    print("   Phase 2B CONSERVATIVE 結果分析")
+    print("=" * 50)
+    
+    trade_win_rate = eval_results.get('trade_win_rate', 0)
+    profit_per_trade = eval_results.get('expected_profit_per_trade', 0)
+    accuracy = eval_results.get('accuracy', 0)
+    
+    print(f"🛡️ 保守的指標:")
+    print(f"  TRADE勝率: {trade_win_rate:.1%}")
+    print(f"  利益/トレード: {profit_per_trade:+.2f}pips")
+    print(f"  全体精度: {accuracy:.1%}")
+    
+    trainer.save_results()
+    
+    return {
+        'phase': '2B_conservative',
+        'approach': 'conservative_profitable',
+        'params': {'tp_pips': tp_pips, 'sl_pips': sl_pips, 'max_trade_ratio': max_trade_ratio},
+        'eval_results': eval_results,
+        'train_results': train_results
+    }
+
+def run_phase2b_comparison_suite(data_path: str, sample_size: int = 500000) -> Dict:
+    """
+    Phase 2B: 全アプローチ比較実行
+    """
+    print("🚀" * 20)
+    print("    Phase 2B: 全アプローチ比較実行開始")
+    print("🚀" * 20)
+    
+    results = {}
+    best_approach = None
+    best_profit = -999
+    
+    approaches = [
+        {
+            'name': 'realistic',
+            'func': run_phase2b_realistic_pipeline,
+            'params': {'tp_pips': 6.0, 'sl_pips': 4.0}
+        },
+        {
+            'name': 'momentum',
+            'func': run_phase2b_momentum_pipeline,
+            'params': {'body_ratio': 0.7, 'min_body_pips': 4.0}
+        },
+        {
+            'name': 'conservative',
+            'func': run_phase2b_conservative_pipeline,
+            'params': {'tp_pips': 5.0, 'sl_pips': 4.0, 'max_trade_ratio': 0.30}
+        }
+    ]
+    
+    # 各アプローチを実行
+    for approach in approaches:
+        print(f"\n{'='*60}")
+        print(f"🔄 {approach['name'].upper()} アプローチ実行中...")
+        print(f"{'='*60}")
+        
+        try:
+            result = approach['func'](
+                data_path=data_path,
+                sample_size=sample_size,
+                epochs=30,  # 比較用に軽量化
+                **approach['params']
+            )
+            
+            results[approach['name']] = result
+            profit = result['eval_results'].get('expected_profit_per_trade', -999)
+            
+            if profit > best_profit:
+                best_profit = profit
+                best_approach = approach['name']
+                
+        except Exception as e:
+            print(f"❌ {approach['name']} エラー: {e}")
+            results[approach['name']] = {'error': str(e)}
+            continue
+    
+    # 結果比較表示
+    print("\n" + "🏆" * 20)
+    print("    Phase 2B 最終比較結果")
+    print("🏆" * 20)
+    
+    comparison_table = []
+    for name, result in results.items():
+        if 'error' not in result:
+            eval_res = result['eval_results']
+            comparison_table.append({
+                'アプローチ': name.upper(),
+                'TRADE勝率': f"{eval_res.get('trade_win_rate', 0):.1%}",
+                '利益/トレード': f"{eval_res.get('expected_profit_per_trade', 0):+.2f}pips",
+                '全体精度': f"{eval_res.get('accuracy', 0):.1%}",
+                'TRADEシグナル数': eval_res.get('trade_signals', 0)
+            })
+    
+    # 表形式で表示
+    if comparison_table:
+        print(f"{'アプローチ':<15} {'勝率':<8} {'利益':<12} {'精度':<8} {'シグナル数':<10}")
+        print("-" * 65)
+        for row in comparison_table:
+            print(f"{row['アプローチ']:<15} {row['TRADE勝率']:<8} {row['利益/トレード']:<12} {row['全体精度']:<8} {row['TRADEシグナル数']:<10}")
+    
+    # 最優秀アプローチ発表
+    if best_approach:
+        print(f"\n🥇 最優秀アプローチ: {best_approach.upper()}")
+        print(f"   利益: {best_profit:+.2f}pips/トレード")
+        
+        # 詳細分析
+        best_result = results[best_approach]
+        best_eval = best_result['eval_results']
+        
+        print(f"\n📊 {best_approach.upper()} 詳細分析:")
+        print(f"   勝率: {best_eval.get('trade_win_rate', 0):.1%}")
+        print(f"   精度: {best_eval.get('accuracy', 0):.1%}")
+        print(f"   TRADEシグナル: {best_eval.get('trade_signals', 0)}")
+        print(f"   NO_TRADEシグナル: {best_eval.get('no_trade_signals', 0)}")
+        
+        # Phase 1 → Phase 2B 改善幅
+        phase1_profit = -1.10  # Phase 1の結果
+        improvement = best_profit - phase1_profit
+        print(f"\n📈 Phase 1 → Phase 2B 改善:")
+        print(f"   Phase 1: -1.10pips → Phase 2B: {best_profit:+.2f}pips")
+        print(f"   改善幅: {improvement:+.2f}pips/トレード")
+        
+        if best_profit > 0:
+            print("   ✅ 利益化達成！")
+        else:
+            print("   ⚠️ まだ損失。さらなる改善が必要")
+    
+    return {
+        'phase': '2B_comparison',
+        'results': results,
+        'best_approach': best_approach,
+        'best_profit': best_profit,
+        'comparison_table': comparison_table
+    }
 
 def _generate_phase2a_recommendations(eval_results: Dict, approach: str) -> List[str]:
     """
@@ -1160,95 +1402,718 @@ def _generate_phase2a_recommendations(eval_results: Dict, approach: str) -> List
         recommendations.append("✅ 良好な結果です！実運用テストに進めます")
     
     return recommendations
+def run_phase2d_chatgpt_improved_pipeline(data_path: str,
+                                         approach: str = "chatgpt_improved",
+                                         tp_pips: float = 5.0,
+                                         sl_pips: float = 3.0,
+                                         sample_size: int = 500000,
+                                         epochs: int = 35) -> Dict:
+    """
+    Phase 2D: ChatGPT改善版パイプライン実行
+    - 強化特徴量エンジニアリング
+    - lookforward_ticks=120
+    - 最適化パラメータ
+    """
+    print("🚀" * 20)
+    print("    Phase 2D: ChatGPT改善版パイプライン")
+    print(f"    アプローチ: {approach}")
+    print(f"    設定: TP={tp_pips}pips, SL={sl_pips}pips")
+    print("    強化: 新特徴量 + lookforward=120")
+    print("🚀" * 20)
+    
+    # トレーナー初期化
+    trainer = ScalpingTrainer(data_path, use_binary_classification=True)
+    
+    # データ読み込み
+    if sample_size:
+        print(f"サンプルデータ読み込み: {sample_size:,} 行")
+        trainer.ohlcv_data = load_sample_data(data_path, sample_size)
+    else:
+        print("全データ読み込み...")
+        tick_data = trainer.loader.load_tick_data_auto(data_path)
+        trainer.ohlcv_data = trainer.loader.tick_to_ohlcv_1min(tick_data)
+    
+    print(f"1分足データ: {len(trainer.ohlcv_data)} 本")
+    
+    # ChatGPT強化特徴量生成
+    print("ChatGPT強化特徴量生成...")
+    trainer.features_data = trainer.feature_engineer.create_all_features_enhanced(trainer.ohlcv_data)
+    
+    print(f"強化特徴量数: {len(trainer.features_data.columns)} 列")
+    
+    # ChatGPT改善ラベル生成
+    print(f"ChatGPT改善ラベル生成 (lookforward=120)...")
+    
+    chatgpt_labeler = ScalpingLabeler(
+        profit_pips=tp_pips,
+        loss_pips=sl_pips,
+        lookforward_ticks=120,  # ChatGPT提案
+        use_or_conditions=False
+    )
+    
+    if approach == "chatgpt_improved":
+        trainer.labels_data = chatgpt_labeler.create_chatgpt_improved_labels(
+            trainer.features_data, tp_pips=tp_pips, sl_pips=sl_pips
+        )
+    elif approach == "parameter_optimized":
+        trainer.labels_data = chatgpt_labeler.create_parameter_optimized_labels(
+            trainer.features_data, tp_pips=tp_pips, sl_pips=sl_pips
+        )
+    else:
+        raise ValueError(f"未知のアプローチ: {approach}")
+    
+    # データクリーニング
+    print("データクリーニング...")
+    complete_mask = ~(trainer.features_data.isna().any(axis=1) | trainer.labels_data.isna())
+    trainer.features_data = trainer.features_data[complete_mask]
+    trainer.labels_data = trainer.labels_data[complete_mask]
+    
+    print(f"完全データ: {len(trainer.features_data)} 行")
+    
+    # ラベル分布確認
+    label_dist = dict(zip(*np.unique(trainer.labels_data, return_counts=True)))
+    total = len(trainer.labels_data)
+    trade_ratio = label_dist.get(1, 0) / total
+    
+    print(f"\nChatGPT改善ラベル分布:")
+    print(f"  TRADE: {label_dist.get(1, 0):,} ({trade_ratio:.1%})")
+    print(f"  NO_TRADE: {label_dist.get(0, 0):,} ({(1-trade_ratio):.1%})")
+    
+    # データ分割
+    train_features, train_labels, val_features, val_labels, test_features, test_labels = trainer.split_data_timeseries()
+    
+    # ChatGPT改善モデル学習
+    print("ChatGPT改善モデル学習...")
+    
+    # より高度なモデル構成（特徴量が増えたため）
+    n_features = len(train_features.columns)
+    trainer.model = ScalpingCNNLSTM(
+        sequence_length=trainer.sequence_length,
+        n_features=n_features,
+        n_classes=2,
+        cnn_filters=[20, 40],     # 特徴量増加に対応
+        kernel_sizes=[3, 5],
+        lstm_units=28,            # やや増加
+        dropout_rate=0.4,
+        learning_rate=0.001
+    )
+    
+    # 学習実行
+    train_results = trainer.train_model(
+        train_features, train_labels,
+        val_features, val_labels,
+        epochs=epochs,
+        batch_size=64
+    )
+    
+    # 評価
+    eval_results = trainer.evaluate_model(test_features, test_labels)
+    
+    # ChatGPT改善結果分析
+    print("\n" + "🚀" * 20)
+    print("    ChatGPT改善結果分析")
+    print("🚀" * 20)
+    
+    trade_win_rate = eval_results.get('trade_win_rate', 0)
+    profit_per_trade = eval_results.get('expected_profit_per_trade', 0)
+    accuracy = eval_results.get('accuracy', 0)
+    
+    print(f"📊 ChatGPT改善指標:")
+    print(f"  TRADE勝率: {trade_win_rate:.1%} (目標: 50%+)")
+    print(f"  利益/トレード: {profit_per_trade:+.2f}pips (目標: +0.5pips)")
+    print(f"  全体精度: {accuracy:.1%}")
+    print(f"  特徴量数: {n_features}")
+    
+    # 改善判定
+    chatgpt_success = (trade_win_rate >= 0.50) and (profit_per_trade > 0.0)
+    baseline_improvement = profit_per_trade > -1.29  # Phase 2B REALISTICとの比較
+    
+    if chatgpt_success:
+        print("🎉 ChatGPT改善成功！利益化達成！")
+    elif baseline_improvement:
+        print("📈 ベースライン改善！さらなる最適化で利益化可能")
+    else:
+        print("⚠️ 追加改善が必要")
+    
+    # 改善履歴比較
+    print(f"\n📈 全Phase比較:")
+    print(f"  Phase 1: 勝率40.8%, 利益-1.10pips")
+    print(f"  Phase 2A: 勝率25.0%, 利益-3.00pips")
+    print(f"  Phase 2B: 勝率39.2%, 利益-1.29pips")
+    print(f"  Phase 2D: 勝率{trade_win_rate:.1%}, 利益{profit_per_trade:+.2f}pips")
+    
+    improvement_2b = profit_per_trade - (-1.29)
+    print(f"  Phase 2B→2D改善: {improvement_2b:+.2f}pips")
+    
+    trainer.save_results()
+    
+    return {
+        'phase': '2D',
+        'approach': approach,
+        'eval_results': eval_results,
+        'train_results': train_results,
+        'chatgpt_success': chatgpt_success,
+        'baseline_improvement': baseline_improvement,
+        'feature_count': n_features,
+        'data_info': {
+            'trade_ratio': trade_ratio,
+            'label_distribution': label_dist
+        }
+    }
 
+def run_phase2d_grid_search(data_path: str, sample_size: int = 500000) -> Dict:
+    """
+    ChatGPT提案のグリッドサーチ実行
+    tp_pips = [4, 5], sl_pips = [3], max_trade_ratio = [0.25, 0.3, 0.35, 0.4]
+    """
+    print("🔍" * 20)
+    print("    Phase 2D: ChatGPTグリッドサーチ")
+    print("🔍" * 20)
+    
+    # ChatGPT提案のパラメータ範囲
+    tp_options = [4.0, 5.0]
+    sl_options = [3.0]
+    trade_ratio_options = [0.25, 0.30, 0.35, 0.40]
+    
+    results = {}
+    best_result = None
+    best_profit = -999
+    
+    total_combinations = len(tp_options) * len(sl_options) * len(trade_ratio_options)
+    current_combination = 0
+    
+    print(f"グリッドサーチ開始: {total_combinations} 組み合わせ")
+    
+    for tp_pips in tp_options:
+        for sl_pips in sl_options:
+            for max_trade_ratio in trade_ratio_options:
+                current_combination += 1
+                
+                print(f"\n{'='*50}")
+                print(f"組み合わせ {current_combination}/{total_combinations}")
+                print(f"TP={tp_pips}pips, SL={sl_pips}pips, 最大TRADE={max_trade_ratio:.0%}")
+                print(f"{'='*50}")
+                
+                try:
+                    # パラメータ最適化ラベルでテスト
+                    result = run_phase2d_chatgpt_improved_pipeline(
+                        data_path=data_path,
+                        approach="parameter_optimized",
+                        tp_pips=tp_pips,
+                        sl_pips=sl_pips,
+                        sample_size=sample_size,
+                        epochs=25  # グリッドサーチ用に軽量化
+                    )
+                    
+                    param_key = f"TP{tp_pips}_SL{sl_pips}_TR{max_trade_ratio:.2f}"
+                    results[param_key] = result
+                    
+                    profit = result['eval_results'].get('expected_profit_per_trade', -999)
+                    win_rate = result['eval_results'].get('trade_win_rate', 0)
+                    
+                    print(f"結果: 勝率{win_rate:.1%}, 利益{profit:+.2f}pips")
+                    
+                    if profit > best_profit:
+                        best_profit = profit
+                        best_result = result
+                        best_params = (tp_pips, sl_pips, max_trade_ratio)
+                        print(f"🏆 新ベスト: {profit:+.2f}pips")
+                    
+                except Exception as e:
+                    print(f"❌ エラー: {e}")
+                    continue
+    
+    # グリッドサーチ結果表示
+    print("\n" + "🏆" * 30)
+    print("    ChatGPTグリッドサーチ結果")
+    print("🏆" * 30)
+    
+    # 結果テーブル作成
+    print(f"{'パラメータ':<20} {'勝率':<8} {'利益':<10} {'精度':<8}")
+    print("-" * 50)
+    
+    for param_key, result in results.items():
+        if 'eval_results' in result:
+            eval_res = result['eval_results']
+            win_rate = eval_res.get('trade_win_rate', 0)
+            profit = eval_res.get('expected_profit_per_trade', 0)
+            accuracy = eval_res.get('accuracy', 0)
+            
+            print(f"{param_key:<20} {win_rate:.1%}    {profit:+.2f}pips  {accuracy:.1%}")
+    
+    # 最優秀結果
+    if best_result:
+        print(f"\n🥇 最優秀パラメータ:")
+        print(f"   TP={best_params[0]}pips, SL={best_params[1]}pips, 最大TRADE={best_params[2]:.0%}")
+        print(f"   利益: {best_profit:+.2f}pips/トレード")
+        print(f"   勝率: {best_result['eval_results'].get('trade_win_rate', 0):.1%}")
+        
+        if best_profit > 0:
+            print("   ✅ 利益化達成！")
+        else:
+            print("   ⚠️ さらなる改善が必要")
+    
+    return {
+        'phase': '2D_grid_search',
+        'results': results,
+        'best_result': best_result,
+        'best_profit': best_profit,
+        'best_params': best_params if best_result else None,
+        'total_combinations': total_combinations
+    }
+
+def run_phase2d_ensemble_pipeline(data_path: str, sample_size: int = 500000) -> Dict:
+    """
+    ChatGPT提案のアンサンブル手法実行
+    realistic + conservative 両方がTRADEと予測した場合のみ実行
+    """
+    print("🤝" * 20)
+    print("    Phase 2D: ChatGPTアンサンブル")
+    print("    戦略: realistic AND conservative 合意")
+    print("🤝" * 20)
+    
+    # トレーナー初期化
+    trainer = ScalpingTrainer(data_path, use_binary_classification=True)
+    
+    # データ読み込み・特徴量生成
+    if sample_size:
+        trainer.ohlcv_data = load_sample_data(data_path, sample_size)
+    else:
+        tick_data = trainer.loader.load_tick_data_auto(data_path)
+        trainer.ohlcv_data = trainer.loader.tick_to_ohlcv_1min(tick_data)
+    
+    trainer.features_data = trainer.feature_engineer.create_all_features_enhanced(trainer.ohlcv_data)
+    
+    # 複数のラベラーでラベル生成
+    print("アンサンブル用ラベル生成...")
+    
+    # ラベラー1: realistic (最適化パラメータ)
+    realistic_labeler = ScalpingLabeler(
+        profit_pips=4.0, loss_pips=3.0, lookforward_ticks=120, use_or_conditions=False
+    )
+    realistic_labels = realistic_labeler.create_parameter_optimized_labels(
+        trainer.features_data, tp_pips=4.0, sl_pips=3.0, max_trade_ratio=0.30
+    )
+    
+    # ラベラー2: conservative
+    conservative_labeler = ScalpingLabeler(
+        profit_pips=5.0, loss_pips=3.0, lookforward_ticks=120, use_or_conditions=False
+    )
+    conservative_labels = conservative_labeler.create_chatgpt_improved_labels(
+        trainer.features_data, tp_pips=5.0, sl_pips=3.0
+    )
+    
+    # アンサンブルラベル生成: 両方がTRADEと判定した場合のみTRADE
+    ensemble_labels = np.zeros(len(realistic_labels), dtype=int)
+    
+    realistic_trade = (realistic_labels == 1).sum()
+    conservative_trade = (conservative_labels == 1).sum()
+    ensemble_trade = 0
+    
+    for i in range(len(realistic_labels)):
+        if realistic_labels.iloc[i] == 1 and conservative_labels.iloc[i] == 1:
+            ensemble_labels[i] = 1
+            ensemble_trade += 1
+    
+    trainer.labels_data = pd.Series(ensemble_labels, index=trainer.features_data.index, name='ensemble_label')
+    
+    print(f"アンサンブルラベル統計:")
+    print(f"  realistic TRADE: {realistic_trade:,}")
+    print(f"  conservative TRADE: {conservative_trade:,}")
+    print(f"  ensemble TRADE: {ensemble_trade:,} ({ensemble_trade/len(ensemble_labels):.1%})")
+    
+    # データクリーニング・分割
+    complete_mask = ~(trainer.features_data.isna().any(axis=1) | trainer.labels_data.isna())
+    trainer.features_data = trainer.features_data[complete_mask]
+    trainer.labels_data = trainer.labels_data[complete_mask]
+    
+    train_features, train_labels, val_features, val_labels, test_features, test_labels = trainer.split_data_timeseries()
+    
+    # アンサンブルモデル学習
+    train_results = trainer.train_model(
+        train_features, train_labels,
+        val_features, val_labels,
+        epochs=30,
+        batch_size=64
+    )
+    
+    # 評価
+    eval_results = trainer.evaluate_model(test_features, test_labels)
+    
+    # アンサンブル結果分析
+    print("\n" + "🤝" * 20)
+    print("    アンサンブル結果分析")
+    print("🤝" * 20)
+    
+    trade_win_rate = eval_results.get('trade_win_rate', 0)
+    profit_per_trade = eval_results.get('expected_profit_per_trade', 0)
+    accuracy = eval_results.get('accuracy', 0)
+    
+    print(f"📊 アンサンブル指標:")
+    print(f"  TRADE勝率: {trade_win_rate:.1%}")
+    print(f"  利益/トレード: {profit_per_trade:+.2f}pips")
+    print(f"  全体精度: {accuracy:.1%}")
+    print(f"  シグナル厳選効果: {ensemble_trade/len(ensemble_labels):.1%}")
+    
+    ensemble_success = (trade_win_rate >= 0.60) and (profit_per_trade > 0.0)
+    
+    if ensemble_success:
+        print("🎉 アンサンブル成功！高精度・高利益達成！")
+    else:
+        print("🔧 アンサンブルでも改善が必要")
+    
+    trainer.save_results()
+    
+    return {
+        'phase': '2D_ensemble',
+        'approach': 'realistic_conservative_ensemble',
+        'eval_results': eval_results,
+        'train_results': train_results,
+        'ensemble_success': ensemble_success,
+        'ensemble_stats': {
+            'realistic_trade': realistic_trade,
+            'conservative_trade': conservative_trade,
+            'ensemble_trade': ensemble_trade,
+            'ensemble_ratio': ensemble_trade/len(ensemble_labels)
+        }
+    }
+
+class ParameterOptimizedTrainer:
+    """パラメータ別最適化トレーナー"""
+    
+    def __init__(self, data_path: str, base_output_dir: str = "results"):
+        self.data_path = data_path
+        self.base_output_dir = base_output_dir
+        os.makedirs(base_output_dir, exist_ok=True)
+        
+    def train_single_parameter_set(self, 
+                                  tp_pips: float,
+                                  sl_pips: float, 
+                                  trade_threshold: float,
+                                  sample_size: int = 500000,
+                                  epochs: int = 30) -> Dict:
+        """
+        単一パラメータセットでの完全学習・評価
+        """
+        param_id = f"TP{tp_pips}_SL{sl_pips}_TR{trade_threshold:.2f}"
+        print(f"\n{'='*60}")
+        print(f"パラメータ別学習開始: {param_id}")
+        print(f"TP={tp_pips}pips, SL={sl_pips}pips, TRADE閾値={trade_threshold:.0%}")
+        print(f"{'='*60}")
+        
+        # 出力ディレクトリ作成
+        param_dir = os.path.join(self.base_output_dir, param_id)
+        os.makedirs(param_dir, exist_ok=True)
+        
+        try:
+            # 1. パラメータ専用トレーナー初期化
+            trainer = ScalpingTrainer(
+                self.data_path,
+                profit_pips=tp_pips,    # 🔧 パラメータに合わせて設定
+                loss_pips=sl_pips,      # 🔧 パラメータに合わせて設定
+                use_binary_classification=True
+            )
+            
+            # 2. データ読み込み・特徴量生成
+            if sample_size:
+                trainer.ohlcv_data = load_sample_data(self.data_path, sample_size)
+            else:
+                tick_data = trainer.loader.load_tick_data_auto(self.data_path)
+                trainer.ohlcv_data = trainer.loader.tick_to_ohlcv_1min(tick_data)
+            
+            # ChatGPT強化特徴量使用
+            trainer.features_data = trainer.feature_engineer.create_all_features_enhanced(trainer.ohlcv_data)
+            
+            # 3. パラメータ専用ラベル生成
+            print(f"パラメータ専用ラベル生成...")
+            param_labeler = ScalpingLabeler(
+                profit_pips=tp_pips,
+                loss_pips=sl_pips,
+                lookforward_ticks=120,  # ChatGPT提案
+                use_or_conditions=False
+            )
+            
+            trainer.labels_data = param_labeler.create_parameter_optimized_labels(
+                trainer.features_data,
+                tp_pips=tp_pips,
+                sl_pips=sl_pips,
+                max_trade_ratio=trade_threshold
+            )
+            
+            # 4. データクリーニング
+            complete_mask = ~(trainer.features_data.isna().any(axis=1) | trainer.labels_data.isna())
+            trainer.features_data = trainer.features_data[complete_mask]
+            trainer.labels_data = trainer.labels_data[complete_mask]
+            
+            # ラベル分布確認
+            label_dist = dict(zip(*np.unique(trainer.labels_data, return_counts=True)))
+            total = len(trainer.labels_data)
+            trade_ratio = label_dist.get(1, 0) / total
+            
+            print(f"パラメータ専用ラベル分布:")
+            print(f"  TRADE: {label_dist.get(1, 0):,} ({trade_ratio:.1%})")
+            print(f"  NO_TRADE: {label_dist.get(0, 0):,} ({(1-trade_ratio):.1%})")
+            
+            if trade_ratio < 0.05:
+                print(f"⚠️ 警告: TRADEシグナルが5%未満。学習困難の可能性")
+                return {'error': 'insufficient_trade_signals', 'trade_ratio': trade_ratio}
+            
+            # 5. データ分割
+            train_features, train_labels, val_features, val_labels, test_features, test_labels = trainer.split_data_timeseries()
+            
+            # 6. パラメータ専用モデル学習
+            print(f"パラメータ専用モデル学習...")
+            
+            # モデル設定（パラメータに応じて調整）
+            n_features = len(train_features.columns)
+            trainer.model = ScalpingCNNLSTM(
+                sequence_length=trainer.sequence_length,
+                n_features=n_features,
+                n_classes=2,
+                cnn_filters=[16, 32],
+                kernel_sizes=[3, 5],
+                lstm_units=24,
+                dropout_rate=0.4,
+                learning_rate=0.001
+            )
+            
+            # 学習実行
+            train_results = trainer.train_model(
+                train_features, train_labels,
+                val_features, val_labels,
+                epochs=epochs,
+                batch_size=64
+            )
+            
+            # 7. 専用モデルで評価
+            eval_results = trainer.evaluate_model(test_features, test_labels)
+            
+            # 8. 結果保存
+            model_path = os.path.join(param_dir, f"model_{param_id}.h5")
+            trainer.model.save_model(model_path)
+            
+            # 結果JSON保存
+            results = {
+                'parameters': {
+                    'tp_pips': tp_pips,
+                    'sl_pips': sl_pips,
+                    'trade_threshold': trade_threshold,
+                    'param_id': param_id
+                },
+                'data_info': {
+                    'total_samples': total,
+                    'trade_ratio': trade_ratio,
+                    'label_distribution': label_dist
+                },
+                'train_results': train_results,
+                'eval_results': eval_results,
+                'model_path': model_path,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            results_path = os.path.join(param_dir, f"results_{param_id}.json")
+            with open(results_path, 'w') as f:
+                json.dump(results, f, indent=2, default=str)
+            
+            # 結果表示
+            trade_win_rate = eval_results.get('trade_win_rate', 0)
+            profit_per_trade = eval_results.get('expected_profit_per_trade', 0)
+            accuracy = eval_results.get('accuracy', 0)
+            
+            print(f"\n📊 {param_id} 結果:")
+            print(f"  TRADE勝率: {trade_win_rate:.1%}")
+            print(f"  利益/トレード: {profit_per_trade:+.2f}pips")
+            print(f"  全体精度: {accuracy:.1%}")
+            print(f"  モデル保存: {model_path}")
+            print(f"  結果保存: {results_path}")
+            
+            return results
+            
+        except Exception as e:
+            error_result = {
+                'parameters': {'tp_pips': tp_pips, 'sl_pips': sl_pips, 'trade_threshold': trade_threshold},
+                'error': str(e),
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            error_path = os.path.join(param_dir, f"error_{param_id}.json")
+            with open(error_path, 'w') as f:
+                json.dump(error_result, f, indent=2)
+            
+            print(f"❌ {param_id} エラー: {e}")
+            return error_result
+
+def run_phase2e_proper_grid_search(data_path: str, 
+                                  sample_size: int = 500000,
+                                  epochs: int = 25) -> Dict:
+    """
+    Phase 2E: 正しいグリッドサーチ実行
+    各パラメータセットごとにモデルを個別学習・評価
+    """
+    print("🔧" * 30)
+    print("    Phase 2E: 正しいグリッドサーチ")
+    print("    各パラメータでモデル個別学習")
+    print("🔧" * 30)
+    
+    # パラメータ組み合わせ（ChatGPT提案）
+    tp_options = [4.0, 5.0]
+    sl_options = [3.0]
+    trade_threshold_options = [0.25, 0.30, 0.35]  # 0.40は除外（TRADEが多すぎる傾向）
+    
+    total_combinations = len(tp_options) * len(sl_options) * len(trade_threshold_options)
+    print(f"学習予定: {total_combinations} パラメータセット")
+    
+    # 最適化トレーナー初期化
+    optimizer = ParameterOptimizedTrainer(data_path, "phase2e_results")
+    
+    all_results = {}
+    best_result = None
+    best_profit = -999
+    best_param_id = None
+    
+    current_combination = 0
+    
+    for tp_pips in tp_options:
+        for sl_pips in sl_options:
+            for trade_threshold in trade_threshold_options:
+                current_combination += 1
+                
+                print(f"\n🔄 進捗: {current_combination}/{total_combinations}")
+                
+                # パラメータセット別学習・評価
+                result = optimizer.train_single_parameter_set(
+                    tp_pips=tp_pips,
+                    sl_pips=sl_pips,
+                    trade_threshold=trade_threshold,
+                    sample_size=sample_size,
+                    epochs=epochs
+                )
+                
+                param_id = f"TP{tp_pips}_SL{sl_pips}_TR{trade_threshold:.2f}"
+                all_results[param_id] = result
+                
+                # 最良結果更新
+                if 'eval_results' in result:
+                    profit = result['eval_results'].get('expected_profit_per_trade', -999)
+                    
+                    if profit > best_profit:
+                        best_profit = profit
+                        best_result = result
+                        best_param_id = param_id
+                        print(f"🏆 新ベスト: {param_id} = {profit:+.2f}pips")
+    
+    # 最終結果表示
+    print("\n" + "🏆" * 40)
+    print("    Phase 2E 正しいグリッドサーチ結果")
+    print("🏆" * 40)
+    
+    # 結果テーブル
+    print(f"{'パラメータ':<20} {'勝率':<8} {'利益':<12} {'精度':<8} {'状態':<10}")
+    print("-" * 70)
+    
+    successful_results = 0
+    
+    for param_id, result in all_results.items():
+        if 'eval_results' in result:
+            eval_res = result['eval_results']
+            win_rate = eval_res.get('trade_win_rate', 0)
+            profit = eval_res.get('expected_profit_per_trade', 0)
+            accuracy = eval_res.get('accuracy', 0)
+            status = "成功"
+            successful_results += 1
+        else:
+            win_rate = 0
+            profit = 0
+            accuracy = 0
+            status = "失敗"
+        
+        print(f"{param_id:<20} {win_rate:.1%}   {profit:+.2f}pips   {accuracy:.1%}   {status:<10}")
+    
+    # 最優秀結果
+    if best_result and best_profit > -999:
+        print(f"\n🥇 最優秀パラメータ: {best_param_id}")
+        print(f"   利益: {best_profit:+.2f}pips/トレード")
+        print(f"   勝率: {best_result['eval_results'].get('trade_win_rate', 0):.1%}")
+        print(f"   精度: {best_result['eval_results'].get('accuracy', 0):.1%}")
+        
+        if best_profit > 0:
+            print("   🎉 利益化達成！")
+        else:
+            print("   ⚠️ まだ損失だが、正しい学習が実行された")
+    else:
+        print("\n❌ 全パラメータセットで学習失敗")
+    
+    print(f"\n📊 学習成功率: {successful_results}/{total_combinations} ({successful_results/total_combinations:.1%})")
+    
+    # 統合結果保存
+    summary_result = {
+        'phase': '2E_proper_grid_search',
+        'total_combinations': total_combinations,
+        'successful_results': successful_results,
+        'best_param_id': best_param_id,
+        'best_profit': best_profit,
+        'all_results': all_results,
+        'timestamp': datetime.now().isoformat()
+    }
+    
+    with open('phase2e_results/summary_results.json', 'w') as f:
+        json.dump(summary_result, f, indent=2, default=str)
+    
+    return summary_result
+
+# メイン実行部分を更新
 if __name__ == "__main__":
-    # Phase 2A実行
     import sys
     
     data_path = "data/usdjpy_ticks.csv" if len(sys.argv) < 2 else sys.argv[1]
     
-    print("=== USDJPY スキャルピングEA Phase 2A テスト ===")
-    print("Phase 1結果: ラベルバランス改善済み（TRADE 42.5%）")
-    print("Phase 2A目標: 勝率向上（60-80%）、利益確保（+3〜10pips）")
+    print("🔧" * 35)
+    print("    USDJPY スキャルピングEA Phase 2E")
+    print("    正しいパラメータ別学習・評価")
+    print("🔧" * 35)
+    print("問題修正: 各パラメータセットでモデル個別学習")
+    print("ChatGPT指摘: モデルとラベルの整合性確保")
     print()
     
     try:
-        # Phase 2A: 勝率重視アプローチ実行
-        print("🚀 Phase 2A: profit_focused アプローチ実行中...")
+        # Phase 2E: 正しいグリッドサーチ実行
+        print("🚀 Phase 2E 正しいグリッドサーチ実行開始...")
         
-        results = run_phase2a_profit_focused_pipeline(
+        results = run_phase2e_proper_grid_search(
             data_path=data_path,
-            approach="profit_focused",  # 利確9pips, 損切り3pips
             sample_size=500000,
-            epochs=35  # 少し長めに学習
+            epochs=25
         )
         
-        print("\n📊 Phase 2A 最終結果:")
-        eval_results = results['eval_results']
+        print(f"\n🏁 Phase 2E 完了")
         
-        print(f"  🎯 TRADE勝率: {eval_results.get('trade_win_rate', 0):.1%}")
-        print(f"  💰 利益/トレード: {eval_results.get('expected_profit_per_trade', 0):+.2f} pips")
-        print(f"  📈 全体精度: {eval_results.get('accuracy', 0):.1%}")
-        print(f"  📊 成功スコア: {results['success_score']}")
-        
-        # 推奨事項表示
-        print(f"\n💡 推奨事項:")
-        for rec in results['recommendations']:
-            print(f"  • {rec}")
-        
-        # 必要に応じてultra_conservativeも実行
-        if eval_results.get('trade_win_rate', 0) < 0.60:
-            print(f"\n🔄 勝率が60%未満のため、ultra_conservativeアプローチも試行...")
-            
-            ultra_results = run_phase2a_profit_focused_pipeline(
-                data_path=data_path,
-                approach="ultra_conservative",  # 利確12pips, 損切り2pips
-                sample_size=500000,
-                epochs=35
-            )
-            
-            print(f"\n📊 Ultra Conservative 結果:")
-            ultra_eval = ultra_results['eval_results']
-            print(f"  🎯 TRADE勝率: {ultra_eval.get('trade_win_rate', 0):.1%}")
-            print(f"  💰 利益/トレード: {ultra_eval.get('expected_profit_per_trade', 0):+.2f} pips")
-            
-            # 最良結果を選択
-            if ultra_eval.get('expected_profit_per_trade', 0) > eval_results.get('expected_profit_per_trade', 0):
-                print("✅ Ultra Conservative アプローチがより良い結果を示しました")
-                results = ultra_results
-            else:
-                print("✅ Profit Focused アプローチの方が良い結果でした")
-        
-        print("\n🎉 Phase 2A テスト完了！")
-        
-        # Phase 1 vs Phase 2A 比較
-        print("\n📈 Phase 1 → Phase 2A 改善比較:")
-        print("  Phase 1 → TRADE勝率: 40.8%, 利益: -1.10pips")
-        print(f"  Phase 2A → TRADE勝率: {results['eval_results'].get('trade_win_rate', 0):.1%}, 利益: {results['eval_results'].get('expected_profit_per_trade', 0):+.2f}pips")
-        
-        improvement = results['eval_results'].get('expected_profit_per_trade', 0) - (-1.10)
-        print(f"  改善幅: {improvement:+.2f}pips/トレード")
+        if results['best_profit'] > 0:
+            print(f"🎉 利益化達成！最良パラメータ: {results['best_param_id']}")
+            print(f"💰 利益: {results['best_profit']:+.2f}pips/トレード")
+        else:
+            print(f"📈 最良結果: {results['best_param_id']} = {results['best_profit']:+.2f}pips")
+            print(f"🔧 さらなる改善戦略が必要")
         
     except Exception as e:
-        print(f"Phase 2A エラー: {e}")
+        print(f"Phase 2E エラー: {e}")
         import traceback
         traceback.print_exc()
 
 # 個別テスト用関数
-def test_profit_focused_only():
-    """profit_focusedのみテスト（デバッグ用）"""
-    return run_phase2a_profit_focused_pipeline(
+def test_chatgpt_improved_only():
+    """ChatGPT改善版のみテスト"""
+    return run_phase2d_chatgpt_improved_pipeline(
         data_path="data/usdjpy_ticks.csv",
-        approach="profit_focused",
-        sample_size=200000,  # 軽量テスト
+        approach="chatgpt_improved",
+        sample_size=200000,
         epochs=20
     )
 
-def test_ultra_conservative_only():
-    """ultra_conservativeのみテスト（デバッグ用）"""
-    return run_phase2a_profit_focused_pipeline(
+def test_parameter_optimized_only():
+    """パラメータ最適化のみテスト"""
+    return run_phase2d_chatgpt_improved_pipeline(
         data_path="data/usdjpy_ticks.csv",
-        approach="ultra_conservative",
-        sample_size=200000,  # 軽量テスト
+        approach="parameter_optimized",
+        sample_size=200000,
         epochs=20
     )

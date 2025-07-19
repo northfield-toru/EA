@@ -482,6 +482,310 @@ def create_sample_model(sequence_length: int = 30, n_features: int = 87) -> Scal
     """軽量モデルにリダイレクト"""
     return create_lightweight_model(sequence_length, n_features, n_classes=2)
 
+class LightweightScalpingModel:
+    """Phase 2B用軽量スキャルピングモデル"""
+    
+    def __init__(self, 
+                 sequence_length: int = 30,
+                 n_features: int = 87,
+                 n_classes: int = 2,
+                 learning_rate: float = 0.001):
+        """
+        軽量版モデル初期化
+        - パラメータ数を50K以下に抑制
+        - 学習速度とメモリ効率を重視
+        """
+        self.sequence_length = sequence_length
+        self.n_features = n_features
+        self.n_classes = n_classes
+        self.learning_rate = learning_rate
+        
+        self.model = None
+        self.scaler = None
+        self.class_weights = None
+        
+        print(f"軽量モデル初期化: seq={sequence_length}, features={n_features}, classes={n_classes}")
+    
+    def build_lightweight_model(self) -> models.Model:
+        """
+        軽量モデル構築
+        - Conv1D + LSTM のシンプル構成
+        - パラメータ数最小化
+        """
+        print("軽量モデル構築開始...")
+        
+        # 入力層
+        input_layer = layers.Input(
+            shape=(self.sequence_length, self.n_features),
+            name='input_layer'
+        )
+        
+        # 軽量Conv1D層
+        x = layers.Conv1D(
+            filters=16,           # 軽量化: 16フィルタのみ
+            kernel_size=3,
+            activation='relu',
+            padding='same',
+            name='conv1d_light'
+        )(input_layer)
+        
+        x = layers.BatchNormalization(name='bn_conv')(x)
+        x = layers.MaxPooling1D(pool_size=2, name='pool_conv')(x)
+        x = layers.Dropout(0.3, name='dropout_conv')(x)
+        
+        # 軽量LSTM層
+        x = layers.LSTM(
+            units=24,             # 軽量化: 24ユニットのみ
+            return_sequences=False,
+            dropout=0.3,
+            recurrent_dropout=0.3,
+            name='lstm_light'
+        )(x)
+        
+        # 軽量Dense層
+        x = layers.Dense(
+            16,                   # 軽量化: 16ユニット
+            activation='relu',
+            kernel_regularizer=tf.keras.regularizers.l2(0.001),
+            name='dense_light'
+        )(x)
+        
+        x = layers.BatchNormalization(name='bn_dense')(x)
+        x = layers.Dropout(0.4, name='dropout_dense')(x)
+        
+        # 出力層
+        output_layer = layers.Dense(
+            self.n_classes,
+            activation='softmax',
+            name='output_layer'
+        )(x)
+        
+        # モデル作成
+        model = models.Model(
+            inputs=input_layer,
+            outputs=output_layer,
+            name='LightweightScalpingModel'
+        )
+        
+        # コンパイル
+        model.compile(
+            optimizer=optimizers.Adam(learning_rate=self.learning_rate),
+            loss='categorical_crossentropy',
+            metrics=['accuracy']
+        )
+        
+        self.model = model
+        
+        param_count = model.count_params()
+        print(f"軽量モデル構築完了: パラメータ数 {param_count:,}")
+        
+        if param_count > 100000:
+            print(f"⚠️ 警告: パラメータ数が100K超過。さらなる軽量化を検討してください")
+        else:
+            print(f"✅ 軽量化成功: 目標100K以下達成")
+        
+        return model
+    
+    def calculate_enhanced_class_weights(self, y: np.array, strategy: str = "balanced_enhanced") -> Dict:
+        """
+        Phase 2B用強化クラス重み計算
+        Args:
+            y: ラベル配列
+            strategy: "balanced", "balanced_enhanced", "custom"
+        Returns:
+            dict: クラス重み
+        """
+        unique_classes, counts = np.unique(y, return_counts=True)
+        total_samples = len(y)
+        
+        if strategy == "balanced":
+            # 標準的なbalanced重み
+            class_weights = compute_class_weight('balanced', classes=unique_classes, y=y)
+            
+        elif strategy == "balanced_enhanced":
+            # Phase 2B強化版: 少数クラスをさらに重視
+            base_weights = compute_class_weight('balanced', classes=unique_classes, y=y)
+            
+            # 不均衡比に応じた追加強化
+            majority_count = np.max(counts)
+            minority_count = np.min(counts)
+            imbalance_ratio = majority_count / minority_count
+            
+            # 強化係数計算
+            if imbalance_ratio > 10:
+                enhancement_factor = 1.5
+            elif imbalance_ratio > 5:
+                enhancement_factor = 1.3
+            else:
+                enhancement_factor = 1.1
+            
+            # 少数クラス（通常TRADE=1）を強化
+            class_weights = base_weights.copy()
+            minority_class_idx = np.argmin(counts)
+            minority_class = unique_classes[minority_class_idx]
+            
+            for i, class_val in enumerate(unique_classes):
+                if class_val == minority_class:
+                    class_weights[i] *= enhancement_factor
+                    
+        elif strategy == "custom":
+            # カスタム重み: TRADE勝率を考慮
+            class_weights = np.ones(len(unique_classes))
+            
+            for i, class_val in enumerate(unique_classes):
+                class_count = counts[i]
+                class_ratio = class_count / total_samples
+                
+                if class_val == 1:  # TRADEクラス
+                    # TRADEクラスの重みを動的調整
+                    if class_ratio < 0.2:  # 20%未満なら強化
+                        class_weights[i] = 3.0
+                    elif class_ratio < 0.3:  # 30%未満なら中程度強化
+                        class_weights[i] = 2.0
+                    else:
+                        class_weights[i] = 1.5
+                else:  # NO_TRADEクラス
+                    class_weights[i] = 1.0
+        
+        # 辞書形式に変換
+        class_weight_dict = dict(zip(unique_classes, class_weights))
+        
+        print(f"Phase 2B クラス重み計算完了 ({strategy}):")
+        for class_val, weight in class_weight_dict.items():
+            class_name = 'NO_TRADE' if class_val == 0 else 'TRADE'
+            count = counts[np.where(unique_classes == class_val)[0][0]]
+            ratio = count / total_samples
+            print(f"  {class_name}: 重み={weight:.2f}, サンプル数={count:,} ({ratio:.1%})")
+        
+        self.class_weights = class_weight_dict
+        return class_weight_dict
+    
+    def prepare_sequences(self, features_df: pd.DataFrame, labels: Optional[pd.Series] = None) -> Tuple:
+        """
+        軽量版シーケンス準備
+        """
+        print(f"軽量版シーケンス準備: {len(features_df)} 行")
+        
+        # 数値型列のみ選択
+        numeric_columns = features_df.select_dtypes(include=[np.number]).columns
+        features_numeric = features_df[numeric_columns].copy()
+        
+        # 欠損値・無限値処理
+        features_clean = features_numeric.fillna(method='ffill').fillna(0)
+        features_clean = features_clean.replace([np.inf, -np.inf], 0)
+        
+        # スケーリング（軽量版: StandardScaler使用）
+        if self.scaler is None:
+            self.scaler = StandardScaler()
+            scaled_features = self.scaler.fit_transform(features_clean)
+        else:
+            scaled_features = self.scaler.transform(features_clean)
+        
+        # シーケンス作成
+        sequences = []
+        sequence_labels = []
+        
+        for i in range(self.sequence_length, len(scaled_features)):
+            seq = scaled_features[i-self.sequence_length:i]
+            sequences.append(seq)
+            
+            if labels is not None:
+                sequence_labels.append(labels.iloc[i])
+        
+        X = np.array(sequences)
+        
+        if labels is not None:
+            y = np.array(sequence_labels)
+            y_categorical = to_categorical(y, num_classes=self.n_classes)
+            
+            print(f"軽量版シーケンス完了: X={X.shape}, y={y_categorical.shape}")
+            return X, y_categorical, y
+        
+        print(f"軽量版シーケンス完了: X={X.shape}")
+        return X
+    
+    def train_lightweight(self, 
+                         X_train: np.array, 
+                         y_train: np.array,
+                         X_val: np.array,
+                         y_val: np.array,
+                         epochs: int = 50,
+                         batch_size: int = 64,
+                         class_weight_strategy: str = "balanced_enhanced") -> Dict:
+        """
+        軽量モデル学習
+        """
+        if self.model is None:
+            self.build_lightweight_model()
+        
+        print("軽量モデル学習開始...")
+        
+        # 強化クラス重み計算
+        y_train_raw = np.argmax(y_train, axis=1)
+        class_weights = self.calculate_enhanced_class_weights(y_train_raw, class_weight_strategy)
+        
+        # コールバック設定（軽量版）
+        callbacks_list = [
+            callbacks.EarlyStopping(
+                monitor='val_loss',
+                patience=7,  # やや長めに設定
+                restore_best_weights=True,
+                verbose=1
+            ),
+            callbacks.ReduceLROnPlateau(
+                monitor='val_loss',
+                factor=0.5,
+                patience=3,
+                min_lr=1e-6,
+                verbose=1
+            )
+        ]
+        
+        # 学習実行
+        history = self.model.fit(
+            X_train, y_train,
+            validation_data=(X_val, y_val),
+            epochs=epochs,
+            batch_size=batch_size,
+            callbacks=callbacks_list,
+            class_weight=class_weights,
+            verbose=1
+        )
+        
+        print("軽量モデル学習完了")
+        return history.history
+    
+    def predict_lightweight(self, X: np.array) -> Tuple[np.array, np.array]:
+        """軽量モデル予測"""
+        if self.model is None:
+            raise ValueError("モデルが構築されていません")
+        
+        predictions_proba = self.model.predict(X, verbose=0)
+        predictions_class = np.argmax(predictions_proba, axis=1)
+        
+        return predictions_proba, predictions_class
+
+def create_phase2b_lightweight_model(sequence_length: int = 30, 
+                                    n_features: int = 87, 
+                                    n_classes: int = 2) -> LightweightScalpingModel:
+    """
+    Phase 2B用軽量モデル作成
+    - パラメータ数50K以下
+    - 高速学習・推論
+    """
+    model = LightweightScalpingModel(
+        sequence_length=sequence_length,
+        n_features=n_features,
+        n_classes=n_classes,
+        learning_rate=0.001
+    )
+    
+    model.build_lightweight_model()
+    
+    param_count = model.model.count_params()
+    print(f"Phase 2B軽量モデル作成完了: {param_count:,}パラメータ")
+    
+    return model
 
 if __name__ == "__main__":
     # モデルテスト

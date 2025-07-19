@@ -977,7 +977,534 @@ class ScalpingLabeler:
         logger.info(f"超保守統計: 超高確信TRADE {ultra_trade} ({ultra_trade/len(labels):.1%})")
         
         return pd.Series(labels, index=df.index, name='ultra_conservative_label')
+
+    def create_realistic_profit_labels(self, df: pd.DataFrame, tp_pips: float = 6.0, sl_pips: float = 4.0, price_col: str = 'close') -> pd.Series:
+        """
+        Phase 2B: 現実的利益ラベル生成
+        - 適度な利確目標と損切り設定
+        - 勝率60%以上を目指す現実的なライン
+        
+        Args:
+            df: OHLCV DataFrame
+            tp_pips: 利確目標pips
+            sl_pips: 損切り許容pips
+            price_col: 価格列名
+        Returns:
+            Series: ラベル（0=NO_TRADE, 1=TRADE）
+        """
+        logger.info(f"Phase 2B: 現実的利益ラベル生成開始: {len(df)} 行")
+        logger.info(f"設定: 利確{tp_pips}pips, 損切り{sl_pips}pips")
+        
+        if len(df) == 0:
+            return pd.Series([], dtype=int, name='realistic_profit_label')
+        
+        prices = df[price_col].values
+        labels = np.zeros(len(prices), dtype=int)
+        
+        realistic_trade_count = 0
+        no_trade_count = 0
+        
+        for i in range(len(prices) - 1):
+            try:
+                future_max, future_min = self._calculate_future_extremes(prices, i)
+                
+                # BUY方向の判定
+                buy_entry = prices[i] + self.utils.pips_to_price(self.spread_pips / 2)
+                buy_tp_target = buy_entry + self.utils.pips_to_price(tp_pips)
+                buy_sl_threshold = buy_entry - self.utils.pips_to_price(sl_pips)
+                
+                buy_hits_tp = future_max >= buy_tp_target
+                buy_avoids_sl = future_min >= buy_sl_threshold
+                
+                # SELL方向の判定
+                sell_entry = prices[i] - self.utils.pips_to_price(self.spread_pips / 2)
+                sell_tp_target = sell_entry - self.utils.pips_to_price(tp_pips)
+                sell_sl_threshold = sell_entry + self.utils.pips_to_price(sl_pips)
+                
+                sell_hits_tp = future_min <= sell_tp_target
+                sell_avoids_sl = future_max <= sell_sl_threshold
+                
+                # 現実的条件: TP到達 AND SL回避
+                buy_realistic = buy_hits_tp and buy_avoids_sl
+                sell_realistic = sell_hits_tp and sell_avoids_sl
+                
+                if buy_realistic or sell_realistic:
+                    labels[i] = 1  # TRADE
+                    realistic_trade_count += 1
+                else:
+                    labels[i] = 0  # NO_TRADE
+                    no_trade_count += 1
+                    
+            except Exception as e:
+                if realistic_trade_count + no_trade_count < 10:
+                    logger.warning(f"行 {i} の処理でエラー: {e}")
+                labels[i] = 0
+                no_trade_count += 1
+        
+        # 最後の行
+        labels[-1] = 0
+        no_trade_count += 1
+        
+        # 統計表示
+        total = len(labels)
+        trade_ratio = realistic_trade_count / total
+        
+        logger.info(f"現実的利益ラベル統計:")
+        logger.info(f"  TRADE: {realistic_trade_count:,} ({trade_ratio:.1%})")
+        logger.info(f"  NO_TRADE: {no_trade_count:,} ({(1-trade_ratio):.1%})")
+        
+        return pd.Series(labels, index=df.index, name='realistic_profit_label')
     
+    def create_momentum_optimized_labels(self, df: pd.DataFrame, 
+                                       body_ratio: float = 0.7, 
+                                       min_body_pips: float = 4.0,
+                                       price_col: str = 'close') -> pd.Series:
+        """
+        Phase 2B: モメンタム最適化ラベル生成
+        - ローソク足の実体サイズに基づく判定
+        - 大陽線・大陰線の勢いを捉える
+        
+        Args:
+            df: OHLCV DataFrame（open, high, low, close必須）
+            body_ratio: 実体/レンジ比率の閾値
+            min_body_pips: 最小実体サイズ（pips）
+            price_col: 価格列名
+        Returns:
+            Series: ラベル（0=NO_TRADE, 1=TRADE）
+        """
+        logger.info(f"Phase 2B: モメンタム最適化ラベル生成開始: {len(df)} 行")
+        logger.info(f"設定: 実体比率{body_ratio}, 最小実体{min_body_pips}pips")
+        
+        required_cols = ['open', 'high', 'low', 'close']
+        for col in required_cols:
+            if col not in df.columns:
+                logger.error(f"必須列 '{col}' が見つかりません")
+                return pd.Series([], dtype=int, name='momentum_optimized_label')
+        
+        if len(df) == 0:
+            return pd.Series([], dtype=int, name='momentum_optimized_label')
+        
+        labels = np.zeros(len(df), dtype=int)
+        momentum_trade_count = 0
+        no_momentum_count = 0
+        
+        for i in range(len(df) - 1):
+            try:
+                # 現在のローソク足分析
+                open_price = df['open'].iloc[i]
+                high_price = df['high'].iloc[i]
+                low_price = df['low'].iloc[i]
+                close_price = df['close'].iloc[i]
+                
+                # 実体とレンジの計算
+                body_size = abs(close_price - open_price)
+                total_range = high_price - low_price
+                
+                # 実体サイズ（pips）
+                body_pips = self.utils.price_to_pips(body_size)
+                
+                # 実体比率
+                body_ratio_actual = body_size / total_range if total_range > 0 else 0
+                
+                # 未来の値動き確認
+                future_max, future_min = self._calculate_future_extremes(df[price_col].values, i)
+                
+                # モメンタム条件: 大きな実体 + 高い実体比率
+                has_momentum = (body_pips >= min_body_pips) and (body_ratio_actual >= body_ratio)
+                
+                if has_momentum:
+                    # BUY方向（陽線）のモメンタム
+                    if close_price > open_price:
+                        buy_entry = close_price + self.utils.pips_to_price(self.spread_pips / 2)
+                        buy_tp = buy_entry + self.utils.pips_to_price(6.0)  # 6pips利確
+                        buy_sl = buy_entry - self.utils.pips_to_price(4.0)  # 4pips損切り
+                        
+                        buy_momentum_valid = (future_max >= buy_tp) and (future_min >= buy_sl)
+                        
+                        if buy_momentum_valid:
+                            labels[i] = 1  # BUY TRADE
+                            momentum_trade_count += 1
+                        else:
+                            labels[i] = 0
+                            no_momentum_count += 1
+                    
+                    # SELL方向（陰線）のモメンタム
+                    elif close_price < open_price:
+                        sell_entry = close_price - self.utils.pips_to_price(self.spread_pips / 2)
+                        sell_tp = sell_entry - self.utils.pips_to_price(6.0)  # 6pips利確
+                        sell_sl = sell_entry + self.utils.pips_to_price(4.0)  # 4pips損切り
+                        
+                        sell_momentum_valid = (future_min <= sell_tp) and (future_max <= sell_sl)
+                        
+                        if sell_momentum_valid:
+                            labels[i] = 1  # SELL TRADE
+                            momentum_trade_count += 1
+                        else:
+                            labels[i] = 0
+                            no_momentum_count += 1
+                    else:
+                        labels[i] = 0  # 十字線等
+                        no_momentum_count += 1
+                else:
+                    labels[i] = 0  # モメンタム不足
+                    no_momentum_count += 1
+                    
+            except Exception as e:
+                if momentum_trade_count + no_momentum_count < 10:
+                    logger.warning(f"行 {i} の処理でエラー: {e}")
+                labels[i] = 0
+                no_momentum_count += 1
+        
+        # 最後の行
+        labels[-1] = 0
+        no_momentum_count += 1
+        
+        # 統計表示
+        total = len(labels)
+        trade_ratio = momentum_trade_count / total
+        
+        logger.info(f"モメンタム最適化ラベル統計:")
+        logger.info(f"  モメンタムTRADE: {momentum_trade_count:,} ({trade_ratio:.1%})")
+        logger.info(f"  NO_TRADE: {no_momentum_count:,} ({(1-trade_ratio):.1%})")
+        
+        return pd.Series(labels, index=df.index, name='momentum_optimized_label')
+    
+    def create_conservative_but_profitable_labels(self, df: pd.DataFrame, 
+                                                 tp_pips: float = 5.0, 
+                                                 sl_pips: float = 4.0,
+                                                 max_trade_ratio: float = 0.35,
+                                                 price_col: str = 'close') -> pd.Series:
+        """
+        Phase 2B: 保守的だが利益の出るラベル生成
+        - トレード割合を制限しつつ利益確保
+        - 高品質なシグナルのみを選別
+        
+        Args:
+            df: OHLCV DataFrame
+            tp_pips: 利確目標pips
+            sl_pips: 損切り許容pips
+            max_trade_ratio: 最大TRADE比率
+            price_col: 価格列名
+        Returns:
+            Series: ラベル（0=NO_TRADE, 1=TRADE）
+        """
+        logger.info(f"Phase 2B: 保守的利益ラベル生成開始: {len(df)} 行")
+        logger.info(f"設定: 利確{tp_pips}pips, 損切り{sl_pips}pips, 最大TRADE比率{max_trade_ratio:.1%}")
+        
+        if len(df) == 0:
+            return pd.Series([], dtype=int, name='conservative_profitable_label')
+        
+        prices = df[price_col].values
+        labels = np.zeros(len(prices), dtype=int)
+        
+        # 第1段階: 全候補を評価
+        trade_candidates = []
+        
+        for i in range(len(prices) - 1):
+            try:
+                future_max, future_min = self._calculate_future_extremes(prices, i)
+                
+                # BUY候補の評価
+                buy_entry = prices[i] + self.utils.pips_to_price(self.spread_pips / 2)
+                buy_tp = buy_entry + self.utils.pips_to_price(tp_pips)
+                buy_sl = buy_entry - self.utils.pips_to_price(sl_pips)
+                
+                buy_profitable = (future_max >= buy_tp) and (future_min >= buy_sl)
+                
+                if buy_profitable:
+                    # 利益品質スコア計算
+                    buy_profit_margin = self.utils.price_to_pips(future_max - buy_tp)
+                    buy_safety_margin = self.utils.price_to_pips(future_min - buy_sl)
+                    buy_score = buy_profit_margin + buy_safety_margin
+                    
+                    trade_candidates.append({
+                        'index': i,
+                        'direction': 'BUY',
+                        'score': buy_score,
+                        'profit_margin': buy_profit_margin,
+                        'safety_margin': buy_safety_margin
+                    })
+                
+                # SELL候補の評価
+                sell_entry = prices[i] - self.utils.pips_to_price(self.spread_pips / 2)
+                sell_tp = sell_entry - self.utils.pips_to_price(tp_pips)
+                sell_sl = sell_entry + self.utils.pips_to_price(sl_pips)
+                
+                sell_profitable = (future_min <= sell_tp) and (future_max <= sell_sl)
+                
+                if sell_profitable:
+                    # 利益品質スコア計算
+                    sell_profit_margin = self.utils.price_to_pips(sell_tp - future_min)
+                    sell_safety_margin = self.utils.price_to_pips(sell_sl - future_max)
+                    sell_score = sell_profit_margin + sell_safety_margin
+                    
+                    trade_candidates.append({
+                        'index': i,
+                        'direction': 'SELL',
+                        'score': sell_score,
+                        'profit_margin': sell_profit_margin,
+                        'safety_margin': sell_safety_margin
+                    })
+                    
+            except Exception as e:
+                continue
+        
+        # 第2段階: 高品質候補を選別
+        if trade_candidates:
+            # スコア順でソート
+            trade_candidates.sort(key=lambda x: x['score'], reverse=True)
+            
+            # 最大TRADE比率に基づく選択数
+            max_trades = int(len(prices) * max_trade_ratio)
+            selected_trades = trade_candidates[:max_trades]
+            
+            # ラベル設定
+            for trade in selected_trades:
+                labels[trade['index']] = 1
+            
+            logger.info(f"保守的利益ラベル統計:")
+            logger.info(f"  候補TRADE: {len(trade_candidates):,}")
+            logger.info(f"  選択TRADE: {len(selected_trades):,} ({len(selected_trades)/len(prices):.1%})")
+            logger.info(f"  平均スコア: {np.mean([t['score'] for t in selected_trades]):.2f}")
+            
+            if selected_trades:
+                avg_profit_margin = np.mean([t['profit_margin'] for t in selected_trades])
+                avg_safety_margin = np.mean([t['safety_margin'] for t in selected_trades])
+                logger.info(f"  平均利益マージン: {avg_profit_margin:.2f}pips")
+                logger.info(f"  平均安全マージン: {avg_safety_margin:.2f}pips")
+        else:
+            logger.warning("利益候補が見つかりませんでした")
+        
+        return pd.Series(labels, index=df.index, name='conservative_profitable_label')
+
+    def create_chatgpt_improved_labels(self, df: pd.DataFrame, 
+                                      tp_pips: float = 5.0,
+                                      sl_pips: float = 3.0,
+                                      lookforward_ticks: int = 120,
+                                      buffer_pips: float = 0.5,
+                                      price_col: str = 'close') -> pd.Series:
+        """
+        ChatGPT改善版ラベル生成
+        - lookforward_ticks = 120
+        - スプレッド + バッファを考慮
+        - より現実的な条件設定
+        
+        Args:
+            tp_pips: 利確目標pips
+            sl_pips: 損切り許容pips  
+            lookforward_ticks: 前方参照ティック数（120推奨）
+            buffer_pips: 追加バッファpips
+            price_col: 価格列名
+        Returns:
+            Series: ラベル（0=NO_TRADE, 1=TRADE）
+        """
+        logger.info(f"ChatGPT改善ラベル生成開始: {len(df)} 行")
+        logger.info(f"設定: TP={tp_pips}pips, SL={sl_pips}pips, 前方参照={lookforward_ticks}ティック, バッファ={buffer_pips}pips")
+        
+        if len(df) == 0:
+            return pd.Series([], dtype=int, name='chatgpt_improved_label')
+        
+        prices = df[price_col].values
+        labels = np.zeros(len(prices), dtype=int)
+        
+        # ChatGPT改善版の極値計算関数
+        def _calculate_future_extremes_extended(prices: np.array, start_idx: int) -> Tuple[float, float]:
+            """拡張版未来極値計算（120ティック）"""
+            end_idx = min(start_idx + lookforward_ticks, len(prices))
+            
+            if start_idx >= len(prices) - 1:
+                return prices[start_idx], prices[start_idx]
+            
+            future_prices = prices[start_idx + 1:end_idx + 1]
+            
+            if len(future_prices) == 0:
+                return prices[start_idx], prices[start_idx]
+            
+            return np.max(future_prices), np.min(future_prices)
+        
+        improved_trade_count = 0
+        no_trade_count = 0
+        
+        for i in range(len(prices) - 1):
+            try:
+                future_max, future_min = _calculate_future_extremes_extended(prices, i)
+                
+                # ChatGPT提案: スプレッド + バッファを考慮したエントリー価格
+                base_spread = self.utils.pips_to_price(self.spread_pips)
+                buffer_amount = self.utils.pips_to_price(buffer_pips)
+                
+                # BUY方向の改善判定
+                buy_entry = prices[i] + base_spread / 2
+                buy_tp_target = buy_entry + self.utils.pips_to_price(tp_pips)
+                buy_sl_threshold = buy_entry - self.utils.pips_to_price(sl_pips)
+                
+                # ChatGPT条件: price >= entry + spread + buffer
+                buy_profitable_with_buffer = future_max >= (buy_tp_target + buffer_amount)
+                buy_safe_with_buffer = future_min >= (buy_sl_threshold - buffer_amount)
+                
+                # SELL方向の改善判定
+                sell_entry = prices[i] - base_spread / 2
+                sell_tp_target = sell_entry - self.utils.pips_to_price(tp_pips)
+                sell_sl_threshold = sell_entry + self.utils.pips_to_price(sl_pips)
+                
+                sell_profitable_with_buffer = future_min <= (sell_tp_target - buffer_amount)
+                sell_safe_with_buffer = future_max <= (sell_sl_threshold + buffer_amount)
+                
+                # ChatGPT改善条件: より厳格な利確 + 安全性
+                buy_improved = buy_profitable_with_buffer and buy_safe_with_buffer
+                sell_improved = sell_profitable_with_buffer and sell_safe_with_buffer
+                
+                if buy_improved or sell_improved:
+                    labels[i] = 1  # TRADE
+                    improved_trade_count += 1
+                else:
+                    labels[i] = 0  # NO_TRADE
+                    no_trade_count += 1
+                    
+            except Exception as e:
+                if improved_trade_count + no_trade_count < 10:
+                    logger.warning(f"行 {i} の処理でエラー: {e}")
+                labels[i] = 0
+                no_trade_count += 1
+        
+        # 最後の行
+        labels[-1] = 0
+        no_trade_count += 1
+        
+        # 統計表示
+        total = len(labels)
+        trade_ratio = improved_trade_count / total
+        
+        logger.info(f"ChatGPT改善ラベル統計:")
+        logger.info(f"  TRADE: {improved_trade_count:,} ({trade_ratio:.1%})")
+        logger.info(f"  NO_TRADE: {no_trade_count:,} ({(1-trade_ratio):.1%})")
+        logger.info(f"  期待勝率: 60-70% (バッファ効果)")
+        logger.info(f"  期待利益: +{tp_pips - sl_pips * 0.3:.1f}pips (勝率70%想定)")
+        
+        return pd.Series(labels, index=df.index, name='chatgpt_improved_label')
+    
+    def create_parameter_optimized_labels(self, df: pd.DataFrame,
+                                         tp_pips: float = 4.0,      # ChatGPT提案: 5→4
+                                         sl_pips: float = 3.0,      # ChatGPT提案: 変更なし
+                                         body_ratio: float = 0.6,   # ChatGPT提案: 0.7→0.6
+                                         max_trade_ratio: float = 0.3,  # ChatGPT提案: 0.35→0.3
+                                         price_col: str = 'close') -> pd.Series:
+        """
+        ChatGPT提案パラメータ最適化ラベル生成
+        """
+        logger.info(f"パラメータ最適化ラベル生成開始: {len(df)} 行")
+        logger.info(f"最適化パラメータ: TP={tp_pips}, SL={sl_pips}, body_ratio={body_ratio}, max_trade_ratio={max_trade_ratio}")
+        
+        if len(df) == 0:
+            return pd.Series([], dtype=int, name='parameter_optimized_label')
+        
+        # 必要な列の確認
+        required_cols = ['open', 'high', 'low', 'close']
+        for col in required_cols:
+            if col not in df.columns:
+                logger.error(f"必須列 '{col}' が見つかりません")
+                return pd.Series([], dtype=int, name='parameter_optimized_label')
+        
+        prices = df[price_col].values
+        candidate_trades = []
+        
+        for i in range(len(df) - 1):
+            try:
+                # ローソク足分析（ChatGPT提案のbody_ratio使用）
+                open_price = df['open'].iloc[i]
+                high_price = df['high'].iloc[i]
+                low_price = df['low'].iloc[i]
+                close_price = df['close'].iloc[i]
+                
+                body_size = abs(close_price - open_price)
+                total_range = high_price - low_price
+                actual_body_ratio = body_size / total_range if total_range > 0 else 0
+                
+                # ChatGPT条件: body_ratio >= 0.6
+                has_sufficient_body = actual_body_ratio >= body_ratio
+                
+                if not has_sufficient_body:
+                    continue
+                
+                # 未来の価格変動確認（120ティック）
+                future_max, future_min = self._calculate_future_extremes_extended(prices, i)
+                
+                # 最適化されたTP/SL条件
+                buy_entry = prices[i] + self.utils.pips_to_price(self.spread_pips / 2)
+                buy_tp = buy_entry + self.utils.pips_to_price(tp_pips)
+                buy_sl = buy_entry - self.utils.pips_to_price(sl_pips)
+                
+                sell_entry = prices[i] - self.utils.pips_to_price(self.spread_pips / 2)
+                sell_tp = sell_entry - self.utils.pips_to_price(tp_pips)
+                sell_sl = sell_entry + self.utils.pips_to_price(sl_pips)
+                
+                # 利益ポテンシャル計算
+                buy_profit_potential = 0
+                sell_profit_potential = 0
+                
+                if (future_max >= buy_tp) and (future_min >= buy_sl):
+                    buy_profit_margin = self.utils.price_to_pips(future_max - buy_tp)
+                    buy_safety_margin = self.utils.price_to_pips(future_min - buy_sl)
+                    buy_profit_potential = tp_pips + buy_profit_margin + buy_safety_margin
+                
+                if (future_min <= sell_tp) and (future_max <= sell_sl):
+                    sell_profit_margin = self.utils.price_to_pips(sell_tp - future_min)
+                    sell_safety_margin = self.utils.price_to_pips(sell_sl - future_max)
+                    sell_profit_potential = tp_pips + sell_profit_margin + sell_safety_margin
+                
+                # より良い方向を候補に追加
+                if buy_profit_potential > 0 or sell_profit_potential > 0:
+                    direction = 'BUY' if buy_profit_potential >= sell_profit_potential else 'SELL'
+                    score = max(buy_profit_potential, sell_profit_potential)
+                    
+                    candidate_trades.append({
+                        'index': i,
+                        'direction': direction,
+                        'score': score,
+                        'body_ratio': actual_body_ratio
+                    })
+                    
+            except Exception as e:
+                continue
+        
+        # ChatGPT提案: max_trade_ratio に基づく選択
+        labels = np.zeros(len(prices), dtype=int)
+        
+        if candidate_trades:
+            # スコア順でソート
+            candidate_trades.sort(key=lambda x: x['score'], reverse=True)
+            
+            # 最大トレード比率に基づく選択
+            max_trades = int(len(prices) * max_trade_ratio)
+            selected_trades = candidate_trades[:max_trades]
+            
+            for trade in selected_trades:
+                labels[trade['index']] = 1
+            
+            logger.info(f"パラメータ最適化ラベル統計:")
+            logger.info(f"  候補数: {len(candidate_trades):,}")
+            logger.info(f"  選択数: {len(selected_trades):,} ({len(selected_trades)/len(prices):.1%})")
+            logger.info(f"  平均スコア: {np.mean([t['score'] for t in selected_trades]):.2f}")
+            logger.info(f"  平均body_ratio: {np.mean([t['body_ratio'] for t in selected_trades]):.3f}")
+        
+        return pd.Series(labels, index=df.index, name='parameter_optimized_label')
+    
+    def _calculate_future_extremes_extended(self, prices: np.array, start_idx: int, lookforward_ticks: int = 120) -> Tuple[float, float]:
+        """
+        拡張版未来極値計算（ChatGPT提案の120ティック）
+        """
+        end_idx = min(start_idx + lookforward_ticks, len(prices))
+        
+        if start_idx >= len(prices) - 1:
+            return prices[start_idx], prices[start_idx]
+        
+        future_prices = prices[start_idx + 1:end_idx + 1]
+        
+        if len(future_prices) == 0:
+            return prices[start_idx], prices[start_idx]
+        
+        return np.max(future_prices), np.min(future_prices)
+
 class LabelPostProcessor:
     """ラベル後処理クラス"""
     
@@ -1065,95 +1592,6 @@ def create_sample_labels(ohlcv_df: pd.DataFrame,
     analysis['validation'] = validation
     
     return labels, analysis
-
-def create_realistic_profit_labels(df: pd.DataFrame, tp_pips=6, sl_pips=4, max_trade_ratio=0.35):
-    """
-    スキャルピングにおける現実的なTP/SLでのラベル生成
-    - tp_pips: 利益目標（pips）
-    - sl_pips: 損失許容（pips）
-    - max_trade_ratio: データのうち最大何％までをトレード対象にするか
-    """
-    df = df.copy()
-    df['label'] = 0  # 初期化（0 = no_trade）
-
-    tp = tp_pips * 0.01  # 例: 6pips -> 0.06円
-    sl = sl_pips * 0.01
-
-    n = len(df)
-    trade_indices = []
-
-    for i in range(n - 10):  # 10足後ろまで検証
-        entry_price = df.iloc[i]['close']
-        highs = df.iloc[i+1:i+11]['high']
-        lows = df.iloc[i+1:i+11]['low']
-
-        if highs.max() - entry_price >= tp:
-            trade_indices.append(i)
-        elif entry_price - lows.min() >= sl:
-            trade_indices.append(i)
-
-    # 過剰なトレードを避ける
-    max_trades = int(max_trade_ratio * n)
-    selected = trade_indices[:max_trades]
-    df.loc[selected, 'label'] = 1
-
-    return df
-
-def create_momentum_optimized_labels(df: pd.DataFrame, body_ratio=0.7, vol_multiplier=1.2):
-    """
-    モメンタム優位なローソク足を検出し、ラベルを付与（1 = トレード対象）
-    """
-    df = df.copy()
-    df['label'] = 0
-
-    body = abs(df['close'] - df['open'])
-    candle_range = df['high'] - df['low']
-    body_rate = body / candle_range
-
-    volume_ma = df['tick_volume'].rolling(20).mean()
-    is_momentum = (
-        (body_rate > body_ratio) &
-        (df['tick_volume'] > volume_ma * vol_multiplier)
-    )
-
-    df.loc[is_momentum, 'label'] = 1
-    return df
-
-def create_conservative_but_profitable_labels(df: pd.DataFrame, tp_pips=6, sl_pips=4, body_ratio=0.7, max_trade_ratio=0.2):
-    """
-    モメンタム強めなローソク足の中から、実際にTP/SLを達成できる位置だけに絞ったラベリング
-    """
-    df = df.copy()
-    df['label'] = 0
-
-    # まずモメンタムでフィルタ
-    body = abs(df['close'] - df['open'])
-    candle_range = df['high'] - df['low']
-    body_rate = body / candle_range
-    is_momentum = (body_rate > body_ratio)
-
-    candidate_indices = df[is_momentum].index.tolist()
-    n = len(df)
-    tp = tp_pips * 0.01
-    sl = sl_pips * 0.01
-
-    trade_indices = []
-
-    for i in candidate_indices:
-        if i + 10 >= n:
-            continue
-        entry = df.iloc[i]['close']
-        highs = df.iloc[i+1:i+11]['high']
-        lows = df.iloc[i+1:i+11]['low']
-
-        if highs.max() - entry >= tp or entry - lows.min() >= sl:
-            trade_indices.append(i)
-
-    # trade数を制限
-    max_trades = int(max_trade_ratio * n)
-    selected = trade_indices[:max_trades]
-    df.loc[selected, 'label'] = 1
-    return df
 
 
 if __name__ == "__main__":

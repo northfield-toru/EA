@@ -454,6 +454,119 @@ class FeatureEngineer:
         
         return importance_df
 
+    def create_chatgpt_enhanced_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        ChatGPT提案の強化特徴量を生成
+        - return_rate, real_body_size, shadows, trend_slope, volatility
+        
+        Args:
+            df: OHLCV DataFrame
+        Returns:
+            DataFrame: 強化特徴量付きDataFrame
+        """
+        logger.info("ChatGPT強化特徴量生成開始...")
+        
+        result_df = df.copy()
+        
+        # 1. return_rate = (close - open) / open
+        result_df['return_rate'] = (df['close'] - df['open']) / df['open']
+        
+        # 2. real_body_size = abs(close - open)
+        result_df['real_body_size'] = abs(df['close'] - df['open'])
+        
+        # 3. upper_shadow = high - max(close, open)
+        result_df['upper_shadow'] = df['high'] - df[['close', 'open']].max(axis=1)
+        
+        # 4. lower_shadow = min(close, open) - low
+        result_df['lower_shadow'] = df[['close', 'open']].min(axis=1) - df['low']
+        
+        # 5. trend_slope = (close[t] - close[t-N]) / N for multiple N values
+        for n in [5, 10, 20]:
+            result_df[f'trend_slope_{n}'] = (df['close'] - df['close'].shift(n)) / n
+        
+        # 6. volatility = moving_std(close, window=10)
+        result_df['volatility_10'] = df['close'].rolling(window=10).std()
+        result_df['volatility_20'] = df['close'].rolling(window=20).std()
+        
+        # 追加のChatGPT提案特徴量
+        # 7. 正規化された実体サイズ
+        result_df['normalized_body'] = result_df['real_body_size'] / df['close']
+        
+        # 8. ヒゲ比率（上ヒゲ・下ヒゲの全レンジに対する比率）
+        total_range = df['high'] - df['low']
+        result_df['upper_shadow_ratio'] = result_df['upper_shadow'] / total_range
+        result_df['lower_shadow_ratio'] = result_df['lower_shadow'] / total_range
+        
+        # 9. 実体比率（ChatGPT提案のbody_ratio）
+        result_df['body_ratio'] = result_df['real_body_size'] / total_range
+        
+        # 10. 価格位置（高安値レンジ内でのclose位置）
+        result_df['price_position'] = (df['close'] - df['low']) / total_range
+        
+        # 11. 前期間との比較特徴量
+        result_df['body_size_change'] = result_df['real_body_size'].pct_change()
+        result_df['volatility_change'] = result_df['volatility_10'].pct_change()
+        
+        # 12. モメンタム指標の強化
+        result_df['price_acceleration'] = result_df['trend_slope_5'].diff()  # 価格加速度
+        result_df['volatility_momentum'] = result_df['volatility_10'] / result_df['volatility_20']
+        
+        # 13. 相対的強さ指標
+        result_df['relative_close'] = df['close'] / df['close'].rolling(20).mean()
+        result_df['relative_volume'] = df['volume'] / df['volume'].rolling(20).mean()
+        
+        # 14. 時間軸特徴量の強化
+        result_df['hour_sin'] = np.sin(2 * np.pi * result_df['hour'] / 24)
+        result_df['hour_cos'] = np.cos(2 * np.pi * result_df['hour'] / 24)
+        result_df['minute_sin'] = np.sin(2 * np.pi * result_df['minute'] / 60)
+        result_df['minute_cos'] = np.cos(2 * np.pi * result_df['minute'] / 60)
+        
+        # 無限値・NaN値の処理
+        result_df = result_df.replace([np.inf, -np.inf], np.nan)
+        result_df = result_df.fillna(method='ffill').fillna(0)
+        
+        logger.info(f"ChatGPT強化特徴量生成完了: {len(result_df.columns)} 列")
+        
+        # 新規追加特徴量の統計表示
+        new_features = [
+            'return_rate', 'real_body_size', 'upper_shadow', 'lower_shadow',
+            'trend_slope_5', 'trend_slope_10', 'trend_slope_20',
+            'volatility_10', 'volatility_20', 'normalized_body',
+            'upper_shadow_ratio', 'lower_shadow_ratio', 'body_ratio',
+            'price_position', 'body_size_change', 'volatility_change',
+            'price_acceleration', 'volatility_momentum',
+            'relative_close', 'relative_volume'
+        ]
+        
+        logger.info(f"新規特徴量: {len(new_features)}個")
+        for feature in new_features[:10]:  # 最初の10個を表示
+            if feature in result_df.columns:
+                logger.info(f"  {feature}: 平均={result_df[feature].mean():.6f}, 標準偏差={result_df[feature].std():.6f}")
+        
+        return result_df
+    
+    def create_all_features_enhanced(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        ChatGPT提案を含む全強化特徴量生成
+        """
+        logger.info("全強化特徴量生成開始...")
+        
+        # 基本特徴量
+        result_df = self.create_base_features(df)
+        
+        # 時間特徴量
+        result_df = self.create_time_features(result_df)
+        
+        # 高度な特徴量
+        result_df = self.create_advanced_features(result_df)
+        
+        # ChatGPT強化特徴量
+        result_df = self.create_chatgpt_enhanced_features(result_df)
+        
+        logger.info(f"全強化特徴量生成完了: {len(result_df.columns)} 列")
+        
+        return result_df
+
 
 def create_sample_features(ohlcv_df: pd.DataFrame, sample_size: int = 1000) -> pd.DataFrame:
     """
