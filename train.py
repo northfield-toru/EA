@@ -116,10 +116,14 @@ class ScalpingTrainer:
             self.labels_data = self.labeler.create_binary_labels_vectorized(self.features_data)
             n_classes = 2
             print("2値分類モード: TRADE vs NO_TRADE")
+            # 🔧 FIX: 2値分類の場合のlabel_dist定義を追加
+            label_dist = dict(zip(*np.unique(self.labels_data, return_counts=True)))
         else:
             self.labels_data = self.labeler.create_labels_vectorized(self.features_data)
             n_classes = 3
             print("3値分類モード: BUY vs SELL vs NO_TRADE")
+            # 🔧 FIX: 3値分類の場合のlabel_dist定義を追加
+            label_dist = dict(zip(*np.unique(self.labels_data, return_counts=True)))
         
         # ラベル分布表示
         if self.use_binary_classification:
@@ -141,7 +145,16 @@ class ScalpingTrainer:
         self.labels_data = self.labels_data[complete_mask]
         
         print(f"完全データ: {len(self.features_data)} 行 ({len(self.features_data)/len(self.ohlcv_data)*100:.1f}%)")
-    
+        
+        # 🔧 FIX: 戻り値を追加（元のコードで欠けていた）
+        return {
+            'ohlcv_rows': len(self.ohlcv_data),
+            'feature_columns': len(self.features_data.columns),
+            'complete_rows': len(self.features_data),
+            'label_distribution': label_dist,
+            'n_classes': n_classes
+        }
+
     def split_data_timeseries(self) -> Tuple:
         """
         時系列順でのデータ分割

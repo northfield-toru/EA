@@ -1,5 +1,5 @@
 ﻿"""
-USDJPY スキャルピングEA用 ラベリングモジュール
+USDJPY スキャルピングEA用 ラベリングモジュール - 修正版
 3クラス分類ラベル生成（BUY/SELL/NO_TRADE）
 未来リーク防止を徹底した実装
 """
@@ -38,6 +38,8 @@ class ScalpingLabeler:
         self.lookforward_ticks = lookforward_ticks
         self.spread_pips = spread_pips
         self.use_or_conditions = use_or_conditions
+        # 🔧 FIX: use_flexible_conditions属性を追加（use_or_conditionsと同じ値）
+        self.use_flexible_conditions = use_or_conditions
         self.utils = USDJPYUtils()
         
         condition_type = "OR条件(緩和)" if use_or_conditions else "AND条件(厳格)"
@@ -84,6 +86,34 @@ class ScalpingLabeler:
         # 損切り条件：loss_pips以上の逆行がない
         loss_threshold = entry_price - self.utils.pips_to_price(self.loss_pips)
         no_excessive_loss = future_min >= loss_threshold
+        
+        if self.use_flexible_conditions:
+            # OR条件：利確達成 または 損失が小さい
+            return profit_achieved or no_excessive_loss
+        else:
+            # AND条件：利確達成 かつ 損失が小さい（従来）
+            return profit_achieved and no_excessive_loss
+    
+    def _check_sell_condition(self, current_price: float, future_max: float, future_min: float) -> bool:
+        """
+        SELL条件をチェック（柔軟条件対応版）
+        Args:
+            current_price: 現在価格（MID）
+            future_max: 未来最高値
+            future_min: 未来最安値
+        Returns:
+            bool: SELL条件に合致するか
+        """
+        # スプレッド調整（SELLはBID価格でエントリー）
+        entry_price = current_price - self.utils.pips_to_price(self.spread_pips / 2)
+        
+        # 利確条件：profit_pips以上の下落
+        profit_target = entry_price - self.utils.pips_to_price(self.profit_pips)
+        profit_achieved = future_min <= profit_target
+        
+        # 損切り条件：loss_pips以上の逆行がない
+        loss_threshold = entry_price + self.utils.pips_to_price(self.loss_pips)
+        no_excessive_loss = future_max <= loss_threshold
         
         if self.use_flexible_conditions:
             # OR条件：利確達成 または 損失が小さい
@@ -167,6 +197,8 @@ class ScalpingLabeler:
             percentage = count / total * 100
             logger.info(f"{label_name}: {count:,} ({percentage:.2f}%)")
         
+        return pd.Series(labels, index=df.index, name='label')
+    
     def create_binary_labels_vectorized(self, df: pd.DataFrame, price_col: str = 'close') -> pd.Series:
         """
         2値分類ラベル生成（TRADE vs NO_TRADE）
