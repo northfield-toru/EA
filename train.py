@@ -2061,41 +2061,199 @@ def run_phase2e_proper_grid_search(data_path: str,
     
     return summary_result
 
-# メイン実行部分を更新
+def debug_single_parameter_set(data_path: str,
+                              tp_pips: float = 4.0,
+                              sl_pips: float = 3.0,
+                              trade_threshold: float = 0.30,
+                              sample_size: int = 200000) -> Dict:
+    """
+    デバッグ用単一パラメータセット実行
+    """
+    print(f"🐛 デバッグモード: TP={tp_pips}, SL={sl_pips}, TR={trade_threshold}")
+    
+    try:
+        # 1. トレーナー初期化
+        print("1️⃣ トレーナー初期化...")
+        trainer = ScalpingTrainer(
+            data_path,
+            profit_pips=tp_pips,
+            loss_pips=sl_pips,
+            use_binary_classification=True
+        )
+        print("✅ トレーナー初期化成功")
+        
+        # 2. データ読み込み
+        print("2️⃣ データ読み込み...")
+        trainer.ohlcv_data = load_sample_data(data_path, sample_size)
+        print(f"✅ データ読み込み成功: {len(trainer.ohlcv_data)} 行")
+        
+        # 3. 特徴量生成
+        print("3️⃣ 特徴量生成...")
+        trainer.features_data = trainer.feature_engineer.create_all_features_enhanced(trainer.ohlcv_data)
+        print(f"✅ 特徴量生成成功: {len(trainer.features_data.columns)} 列")
+        
+        # 4. ラベル生成
+        print("4️⃣ ラベル生成...")
+        param_labeler = ScalpingLabeler(
+            profit_pips=tp_pips,
+            loss_pips=sl_pips,
+            lookforward_ticks=120,
+            use_or_conditions=False
+        )
+        
+        trainer.labels_data = param_labeler.create_parameter_optimized_labels(
+            trainer.features_data,
+            tp_pips=tp_pips,
+            sl_pips=sl_pips,
+            max_trade_ratio=trade_threshold
+        )
+        print(f"✅ ラベル生成成功: {len(trainer.labels_data)} 行")
+        
+        # ラベル分布確認
+        label_dist = dict(zip(*np.unique(trainer.labels_data, return_counts=True)))
+        trade_ratio = label_dist.get(1, 0) / len(trainer.labels_data)
+        print(f"📊 ラベル分布: TRADE={label_dist.get(1, 0):,} ({trade_ratio:.1%}), NO_TRADE={label_dist.get(0, 0):,}")
+        
+        if trade_ratio < 0.05:
+            print(f"⚠️ 致命的問題: TRADEシグナルが{trade_ratio:.1%}のみ")
+            return {'fatal_error': 'insufficient_trade_signals', 'trade_ratio': trade_ratio}
+        
+        # 5. データクリーニング
+        print("5️⃣ データクリーニング...")
+        complete_mask = ~(trainer.features_data.isna().any(axis=1) | trainer.labels_data.isna())
+        trainer.features_data = trainer.features_data[complete_mask]
+        trainer.labels_data = trainer.labels_data[complete_mask]
+        print(f"✅ クリーニング完了: {len(trainer.features_data)} 行")
+        
+        # 6. データ分割
+        print("6️⃣ データ分割...")
+        train_features, train_labels, val_features, val_labels, test_features, test_labels = trainer.split_data_timeseries()
+        print(f"✅ 分割完了: Train={len(train_features)}, Val={len(val_features)}, Test={len(test_features)}")
+        
+        # 7. モデル学習
+        print("7️⃣ モデル学習...")
+        train_results = trainer.train_model(
+            train_features, train_labels,
+            val_features, val_labels,
+            epochs=10,  # デバッグ用に短縮
+            batch_size=64
+        )
+        print("✅ モデル学習成功")
+        
+        # 8. 評価
+        print("8️⃣ モデル評価...")
+        eval_results = trainer.evaluate_model(test_features, test_labels)
+        print("✅ モデル評価成功")
+        
+        # 結果表示
+        trade_win_rate = eval_results.get('trade_win_rate', 0)
+        profit_per_trade = eval_results.get('expected_profit_per_trade', 0)
+        accuracy = eval_results.get('accuracy', 0)
+        
+        print(f"\n🎯 デバッグ結果:")
+        print(f"  TRADE勝率: {trade_win_rate:.1%}")
+        print(f"  利益/トレード: {profit_per_trade:+.2f}pips")
+        print(f"  全体精度: {accuracy:.1%}")
+        
+        return {
+            'success': True,
+            'trade_win_rate': trade_win_rate,
+            'profit_per_trade': profit_per_trade,
+            'accuracy': accuracy,
+            'train_results': train_results,
+            'eval_results': eval_results
+        }
+        
+    except Exception as e:
+        print(f"❌ エラー発生: {e}")
+        import traceback
+        traceback.print_exc()
+        return {'error': str(e)}
+
+def run_emergency_fix_pipeline(data_path: str) -> Dict:
+    """
+    緊急修正パイプライン
+    - より緩い条件
+    - 詳細デバッグ情報
+    """
+    print("🚨" * 20)
+    print("    緊急修正パイプライン")
+    print("    Phase 2E失敗の原因調査・修正")
+    print("🚨" * 20)
+    
+    # まずデバッグ実行
+    print("🐛 デバッグ実行開始...")
+    debug_result = debug_single_parameter_set(
+        data_path=data_path,
+        tp_pips=4.0,
+        sl_pips=3.0,
+        trade_threshold=0.30,
+        sample_size=200000
+    )
+    
+    if 'fatal_error' in debug_result:
+        print(f"🚨 致命的問題発見: {debug_result['fatal_error']}")
+        print(f"   TRADEシグナル: {debug_result['trade_ratio']:.1%}")
+        print("\n💡 解決策: より緩い条件で再試行")
+        
+        # より緩い条件で再試行
+        print("🔧 緊急修正: 条件緩和")
+        relaxed_result = debug_single_parameter_set(
+            data_path=data_path,
+            tp_pips=3.0,      # より小さな利確
+            sl_pips=4.0,      # より大きな損切り
+            trade_threshold=0.50,  # より多くのTRADE許可
+            sample_size=200000
+        )
+        
+        return {
+            'phase': 'emergency_fix',
+            'original_debug': debug_result,
+            'relaxed_result': relaxed_result
+        }
+    
+    elif 'success' in debug_result:
+        print("✅ デバッグ成功！Phase 2Eの実装に問題なし")
+        print("   原因: パラメータが厳しすぎた可能性")
+        
+        return {
+            'phase': 'emergency_fix',
+            'debug_result': debug_result,
+            'recommendation': 'use_relaxed_parameters'
+        }
+    
+    else:
+        print(f"❌ デバッグでもエラー: {debug_result.get('error', 'unknown')}")
+        return {
+            'phase': 'emergency_fix',
+            'debug_result': debug_result,
+            'recommendation': 'fundamental_review_needed'
+        }
+
+# メイン実行部分を緊急修正版に更新
 if __name__ == "__main__":
     import sys
     
     data_path = "data/usdjpy_ticks.csv" if len(sys.argv) < 2 else sys.argv[1]
     
-    print("🔧" * 35)
-    print("    USDJPY スキャルピングEA Phase 2E")
-    print("    正しいパラメータ別学習・評価")
-    print("🔧" * 35)
-    print("問題修正: 各パラメータセットでモデル個別学習")
-    print("ChatGPT指摘: モデルとラベルの整合性確保")
-    print()
+    print("🚨" * 35)
+    print("    Phase 2E 緊急修正・診断")
+    print("    失敗原因の特定と修正")
+    print("🚨" * 35)
     
     try:
-        # Phase 2E: 正しいグリッドサーチ実行
-        print("🚀 Phase 2E 正しいグリッドサーチ実行開始...")
+        # 緊急修正パイプライン実行
+        emergency_result = run_emergency_fix_pipeline(data_path)
         
-        results = run_phase2e_proper_grid_search(
-            data_path=data_path,
-            sample_size=500000,
-            epochs=25
-        )
+        print(f"\n🏥 診断完了")
         
-        print(f"\n🏁 Phase 2E 完了")
-        
-        if results['best_profit'] > 0:
-            print(f"🎉 利益化達成！最良パラメータ: {results['best_param_id']}")
-            print(f"💰 利益: {results['best_profit']:+.2f}pips/トレード")
-        else:
-            print(f"📈 最良結果: {results['best_param_id']} = {results['best_profit']:+.2f}pips")
-            print(f"🔧 さらなる改善戦略が必要")
+        if emergency_result.get('recommendation') == 'use_relaxed_parameters':
+            print("💡 推奨: より緩い条件でPhase 2E再実行")
+        elif emergency_result.get('recommendation') == 'fundamental_review_needed':
+            print("🔧 推奨: 根本的なアプローチ見直しが必要")
         
     except Exception as e:
-        print(f"Phase 2E エラー: {e}")
+        print(f"緊急修正エラー: {e}")
         import traceback
         traceback.print_exc()
 
