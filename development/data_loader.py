@@ -220,9 +220,6 @@ class TickDataLoader:
         # 統合
         ohlcv = pd.concat([ohlcv, bid_info, ask_info], axis=1)
 
-        ohlcv['bid'] = bid_info['bid_close'].fillna(method='ffill')
-        ohlcv['ask'] = ask_info['ask_close'].fillna(method='ffill')
-
         # 時間特徴量追加
         ohlcv['hour'] = ohlcv.index.hour
         ohlcv['minute'] = ohlcv.index.minute
