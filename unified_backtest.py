@@ -802,20 +802,20 @@ class UnifiedBacktestSystem:
         修正版ティック精密バックテスト（重複問題完全解決）
         既存メソッドを真の逐次実行版に置き換え
         """
-        return self.run_true_sequential_backtest(
+        return self.run_true_sequential_backtest_fixed(
             ohlcv_signals, tp_pips, sl_pips, timeout_minutes, max_debug_trades
         )
 
-    def run_true_sequential_backtest(self, ohlcv_signals, tp_pips=4.0, sl_pips=6.0, 
-                                    timeout_minutes=60, max_debug_trades=50):
+    def run_true_sequential_backtest_fixed(self, ohlcv_signals, tp_pips=4.0, sl_pips=6.0, 
+                                          timeout_minutes=60, max_debug_trades=50):
         """
-        真の逐次実行バックテスト（重複問題完全解決）
-        1つの取引を完全に処理してから次の取引に進む
+        完全修正版逐次実行バックテスト
+        1つの取引が完全に終了してから次の取引を開始する真の逐次実行
         """
-        print(f"🚀 真の逐次実行バックテスト開始")
-        print(f"🔧 重複問題完全解決版")
+        print(f"🚀 完全修正版逐次実行バックテスト開始")
+        print(f"🔧 重複オーダー問題完全解決版")
         print(f"🔧 TP/SL: {tp_pips}/{sl_pips} pips")
-        print(f"🎯 完全逐次実行: 1取引完了→次取引開始")
+        print(f"🎯 真の逐次実行: 1取引完了後に次取引開始")
         
         if self.tick_data is None:
             print("❌ ティックデータが読み込まれていません")
@@ -836,152 +836,199 @@ class UnifiedBacktestSystem:
             return {'error': 'No valid signals'}
         
         print(f"📊 処理対象シグナル: {len(valid_signals)} 件")
-        print(f"🔍 シグナル時刻範囲: {valid_signals.index[0]} 〜 {valid_signals.index[-1]}")
         
-        # 統計データ初期化
+        # 初期化
         self.trades = []
         self.signal_intervals = []
-        self.debug_trades_log = []
         
-        successful_trades = 0
-        skipped_no_ticks = 0
-        skipped_nan_prices = 0
+        completed_trades = 0
+        skipped_signals = 0
+        last_trade_end_time = None  # 前の取引の終了時刻を記録
         
-        print(f"\n🔍 真の逐次実行ログ（最初の{max_debug_trades}取引）:")
+        print(f"\n🔍 完全修正版ログ（最初の{max_debug_trades}取引）:")
         print("-" * 80)
         
-        # 重要修正: 完全逐次実行メインループ
+        # 完全修正版メインループ
         for signal_idx, (signal_time, signal_row) in enumerate(valid_signals.iterrows(), 1):
             
-            # 進捗表示
-            if signal_idx % 100 == 0:
-                print(f"📈 進捗: {signal_idx}/{len(valid_signals)} ({signal_idx/len(valid_signals):.1%})")
+            is_debug = signal_idx <= max_debug_trades
             
-            # シグナル間隔分析
-            if len(self.signal_intervals) > 0:
-                last_signal_time = valid_signals.index[signal_idx-2] if signal_idx > 1 else signal_time
-                interval_minutes = (signal_time - last_signal_time).total_seconds() / 60.0
-                self.signal_intervals.append(interval_minutes)
-            else:
-                self.signal_intervals.append(0)
+            # 重要修正1: 前の取引が完了していない場合はスキップ
+            if last_trade_end_time is not None and signal_time <= last_trade_end_time:
+                if is_debug:
+                    print(f"\n⏭️  取引 #{signal_idx} スキップ:")
+                    print(f"   シグナル時刻: {signal_time}")
+                    print(f"   前取引終了: {last_trade_end_time}")
+                    print(f"   理由: 前の取引がまだ完了していない")
+                skipped_signals += 1
+                continue
             
-            # デバッグ表示
-            is_debug_trade = signal_idx <= max_debug_trades
-            
-            if is_debug_trade:
-                print(f"\n🔄 取引 #{signal_idx} 開始:")
+            if is_debug:
+                print(f"\n🔄 取引 #{completed_trades + 1} 詳細分析:")
                 print(f"   シグナル時刻: {signal_time}")
-                print(f"   前回からの間隔: {self.signal_intervals[-1]:.1f}分")
+                if last_trade_end_time:
+                    gap_minutes = (signal_time - last_trade_end_time).total_seconds() / 60.0
+                    print(f"   前取引完了からの間隔: {gap_minutes:.1f}分")
                 print(f"   方向: {'BUY' if signal_row['prediction'] == 1 else 'SELL'}")
-                
-                # 前の取引の状況表示
-                if len(self.trades) > 0:
-                    last_trade = self.trades[-1]
-                    print(f"   前回取引: {last_trade.exit_time} 決済済み")
             
-            # ティック検索
+            # ティック検索（シグナル時刻以降）
             signal_ticks = self.tick_data[self.tick_data.index >= signal_time]
             
             if len(signal_ticks) == 0:
-                if is_debug_trade:
+                if is_debug:
                     print(f"   ❌ ティックなし（スキップ）")
-                skipped_no_ticks += 1
+                skipped_signals += 1
                 continue
             
-            # 有効価格検索
-            valid_tick = None
-            valid_time = None
-            entry_tick_index = None
-            
-            for idx, (tick_time, tick_row) in enumerate(signal_ticks.iterrows()):
+            # エントリー処理
+            entry_successful = False
+            for tick_time, tick_row in signal_ticks.iterrows():
                 if pd.notna(tick_row['bid']) and pd.notna(tick_row['ask']):
-                    valid_tick = tick_row
-                    valid_time = tick_time
-                    entry_tick_index = idx
-                    break
+                    entry_mid = (tick_row['bid'] + tick_row['ask']) / 2.0
+                    
+                    if pd.notna(entry_mid) and entry_mid > 0:
+                        entry_time = tick_time
+                        entry_price = entry_mid
+                        entry_successful = True
+                        break
             
-            if valid_tick is None:
-                if is_debug_trade:
-                    print(f"   ❌ 有効価格なし（スキップ）")
-                skipped_nan_prices += 1
+            if not entry_successful:
+                if is_debug:
+                    print(f"   ❌ 有効エントリー価格なし（スキップ）")
+                skipped_signals += 1
                 continue
             
-            # エントリー価格計算
-            entry_mid = (valid_tick['bid'] + valid_tick['ask']) / 2.0
-            
-            if pd.isna(entry_mid) or entry_mid <= 0:
-                if is_debug_trade:
-                    print(f"   ❌ 価格異常: {entry_mid}（スキップ）")
-                skipped_nan_prices += 1
-                continue
-            
-            # 重要修正: 取引作成（1つずつ完全処理）
+            # 取引作成
             trade = FixedTickPreciseTrade(
-                entry_time=valid_time,
-                entry_price=entry_mid,
+                entry_time=entry_time,
+                entry_price=entry_price,
                 direction=int(signal_row['prediction']),
                 tp_pips=tp_pips,
                 sl_pips=sl_pips,
-                trade_id=f"T{signal_idx:04d}"
+                trade_id=f"SEQ{completed_trades + 1:04d}"
             )
             
-            if is_debug_trade:
-                direction_name = 'BUY' if trade.direction == 1 else 'SELL'
-                time_diff = (valid_time - signal_time).total_seconds()
-                print(f"   ✅ エントリー: {valid_time} ({time_diff:.1f}秒後)")
-                print(f"   エントリー価格: {entry_mid:.5f}")
+            if is_debug:
+                time_diff = (entry_time - signal_time).total_seconds()
+                print(f"   ✅ エントリー: {entry_time} ({time_diff:.1f}秒後)")
+                print(f"   エントリー価格: {entry_price:.5f}")
                 print(f"   TP: {trade.tp_price:.5f} / SL: {trade.sl_price:.5f}")
             
-            # 重要修正: この1つの取引を完全に処理する
-            trade_result = self._process_single_trade_completely(
-                trade, signal_ticks, entry_tick_index, timeout_minutes, is_debug_trade
+            # 重要修正2: この取引を完全に処理してから次へ進む
+            trade_end_time = self._process_single_trade_to_completion(
+                trade, signal_ticks, entry_time, timeout_minutes, is_debug
             )
             
-            if trade_result:
-                # 取引完了・記録
+            if trade.is_closed:
+                # 取引完了
                 self.trades.append(trade)
-                successful_trades += 1
+                completed_trades += 1
+                last_trade_end_time = trade_end_time  # 重要: 終了時刻を記録
                 
-                if is_debug_trade:
+                if is_debug:
                     exit_reason = '利確' if trade.exit_reason == 'TP' else '損切' if trade.exit_reason == 'SL' else 'タイムアウト'
                     duration = (trade.exit_time - trade.entry_time).total_seconds()
                     print(f"   🎯 {exit_reason}決済: {trade.pips:+.1f} pips ({duration:.1f}秒)")
-                    print(f"   ✅ 取引完了 → 次の取引へ")
+                    print(f"   🔒 取引完了時刻: {trade_end_time}")
+                    print(f"   ✅ 次の取引は {trade_end_time} 以降のシグナルのみ処理")
                     
                     # 理論値精度確認
                     validation = trade.validate_theoretical_accuracy()
                     if validation['valid']:
                         print(f"   ✅ 理論値精度: {validation['accuracy_level']}")
-                    else:
-                        print(f"   ⚠️ 理論値偏差: {validation['difference']:+.3f}pips")
             else:
-                if is_debug_trade:
-                    print(f"   ❌ 取引処理失敗（スキップ）")
-                skipped_nan_prices += 1
+                if is_debug:
+                    print(f"   ❌ 取引処理失敗")
+                skipped_signals += 1
         
-        # 統計サマリー
-        print(f"\n📊 真の逐次実行バックテスト完了!")
-        print(f"   処理シグナル: {successful_trades}")
-        print(f"   決済完了取引: {len(self.trades)}")
-        print(f"   スキップ（ティックなし）: {skipped_no_ticks}")
-        print(f"   スキップ（価格NaN）: {skipped_nan_prices}")
-        print(f"   有効取引率: {successful_trades/(successful_trades+skipped_no_ticks+skipped_nan_prices):.1%}")
+        print(f"\n📊 完全修正版バックテスト完了!")
+        print(f"   処理対象シグナル: {len(valid_signals)}")
+        print(f"   完了取引: {completed_trades}")
+        print(f"   スキップシグナル: {skipped_signals}")
+        print(f"   有効取引率: {completed_trades/(completed_trades+skipped_signals):.1%}")
         
-        # 間隔分析
-        if self.signal_intervals:
-            print(f"\n⏰ シグナル間隔分析:")
-            print(f"   平均間隔: {np.mean(self.signal_intervals):.1f}分")
-            print(f"   最短間隔: {np.min(self.signal_intervals):.1f}分")
-            print(f"   最長間隔: {np.max(self.signal_intervals):.1f}分")
+        # 重複確認（厳密チェック）
+        overlapping_count = self._check_overlapping_trades_strict()
         
-        # 重要: 逐次実行確認
-        print(f"\n🔄 逐次実行確認:")
-        print(f"   最大同時取引数: 1 (保証)")
-        print(f"   平均同時取引数: 1.0 (保証)")
-        print(f"   ✅ 真の逐次実行正常動作確認！")
-        print(f"   ✅ 重複問題完全解決！")
+        print(f"\n🔄 真の逐次実行検証:")
+        print(f"   重複取引数: {overlapping_count}件")
+        if overlapping_count == 0:
+            print(f"   ✅ 完全逐次実行達成！重複問題解決！")
+        else:
+            print(f"   ❌ まだ重複が残存（要追加調査）")
         
         return self._analyze_true_sequential_results()
+
+    def _process_single_trade_to_completion(self, trade, signal_ticks, entry_time, 
+                                           timeout_minutes, is_debug):
+        """
+        1つの取引を完全に処理する（修正版）
+        
+        Returns:
+            datetime: 取引終了時刻（次の取引開始の基準時刻）
+        """
+        timeout_time = entry_time + pd.Timedelta(minutes=timeout_minutes)
+        
+        # エントリー時刻以降のティックで決済処理
+        for tick_time, tick_row in signal_ticks.iterrows():
+            # エントリー時刻以前は無視
+            if tick_time <= entry_time:
+                continue
+            
+            # 有効な価格データのみ処理
+            if pd.isna(tick_row['bid']) or pd.isna(tick_row['ask']):
+                continue
+            
+            # タイムアウトチェック
+            if tick_time >= timeout_time:
+                mid_price = (tick_row['bid'] + tick_row['ask']) / 2.0
+                if pd.notna(mid_price):
+                    trade.force_close_fixed(tick_time, mid_price)
+                    if is_debug:
+                        print(f"   ⏰ タイムアウト決済準備: {trade.pips:+.1f} pips")
+                return tick_time  # タイムアウト時刻を返す
+            
+            # TP/SL判定
+            if trade.check_tick_exit_fixed(tick_time, tick_row['bid'], tick_row['ask'], is_entry_tick=False):
+                return tick_time  # 決済時刻を返す
+        
+        # ここまで来た場合は期間終了
+        final_tick = self.tick_data.iloc[-1]
+        if pd.notna(final_tick['bid']) and pd.notna(final_tick['ask']):
+            final_mid = (final_tick['bid'] + final_tick['ask']) / 2.0
+            final_time = self.tick_data.index[-1]
+            trade.force_close_fixed(final_time, final_mid)
+            
+            if is_debug:
+                print(f"   🔚 期間終了決済準備: {trade.pips:+.1f} pips")
+        
+        return self.tick_data.index[-1]  # 期間終了時刻を返す
+    
+    def _check_overlapping_trades_strict(self):
+        """厳密な重複取引チェック"""
+        overlapping_count = 0
+        
+        for i in range(len(self.trades)):
+            for j in range(i + 1, len(self.trades)):
+                trade_a = self.trades[i]
+                trade_b = self.trades[j]
+                
+                # 時間重複チェック
+                a_start = trade_a.entry_time
+                a_end = trade_a.exit_time
+                b_start = trade_b.entry_time
+                b_end = trade_b.exit_time
+                
+                # 重複条件: AとBの期間が重なっている
+                if (a_start < b_end and b_start < a_end):
+                    overlapping_count += 1
+                    
+                    # デバッグ情報
+                    print(f"   🚨 重複検出: 取引{i+1} vs 取引{j+1}")
+                    print(f"      取引{i+1}: {a_start} 〜 {a_end}")
+                    print(f"      取引{j+1}: {b_start} 〜 {b_end}")
+        
+        return overlapping_count
     
     def _process_single_trade_completely(self, trade, signal_ticks, entry_tick_index, 
                                        timeout_minutes, is_debug):
