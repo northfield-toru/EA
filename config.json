@@ -1,6 +1,8 @@
 {
+  "data": {
+    "tick_path": "data/usdjpy_ticks.csv"
+  },
   "model_path": "models/best_model.h5",
-  "tick_data_path": "data/usdjpy_ticks.csv",
   "sequence_length": 30,
   "tp_pips": 2.0,
   "sl_pips": 4.0,
@@ -14,7 +16,10 @@
   "timezone": "Asia/Tokyo",
   "output_dir": "results/",
   "eval_test_size": 0.2,
-
+  "model": {
+    "save_path": "models/best_model.h5",
+    "history_plot_path": "plots/training_history.png"
+  },
   "train": {
     "epochs": 50,
     "batch_size": 64,
@@ -26,6 +31,7 @@
     "tp_pips": 2.0,
     "sl_pips": 4.0,
     "confidence_threshold": 0.5,
-    "sequence_length": 30
+    "sequence_length": 30,
+    "downsample_no_trade_ratio": 0.01
   }
 }
