@@ -16,6 +16,7 @@
   "eval_test_size": 0.2,
 
   "train": {
+    "sequence_length": 30,
     "epochs": 50,
     "batch_size": 64,
     "test_size": 0.2,

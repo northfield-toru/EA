@@ -3,6 +3,7 @@ import tensorflow as tf
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
 import os
 from sklearn.model_selection import train_test_split
+from sklearn.utils.class_weight import compute_class_weight
 
 from data_loader import load_tick_data
 from feature_engineering import generate_features
@@ -39,7 +40,7 @@ def prepare_sequences(features, labels, sequence_length):
 def main():
     print("📥 ティックデータ読み込み中...")
     tick_data = load_tick_data(DATA_PATH)
-    
+
     print("🛠️ 特徴量生成中...")
     features = generate_features(tick_data)
 
@@ -48,6 +49,12 @@ def main():
 
     print("📐 シーケンス準備中...")
     X, y = prepare_sequences(features, labels, SEQUENCE_LENGTH)
+
+    print("📊 ラベル分布確認...")
+    unique, counts = np.unique(y, return_counts=True)
+    label_names = ["NO_TRADE", "BUY", "SELL"]
+    for label, count in zip(unique, counts):
+        print(f"{label_names[label]}: {count}")
 
     print("📊 データ分割中...")
     X_temp, X_test, y_temp, y_test = train_test_split(X, y, test_size=TEST_SIZE, shuffle=False)
@@ -58,6 +65,15 @@ def main():
     input_shape = (X_train.shape[1], X_train.shape[2])
     model = build_model(input_shape, learning_rate=LEARNING_RATE)
 
+    print("⚖️ クラス重み計算中...")
+    class_weights_array = compute_class_weight(
+        class_weight='balanced',
+        classes=np.unique(y_train),
+        y=y_train
+    )
+    class_weight_dict = dict(enumerate(class_weights_array))
+    print("⚖️ クラス重み:", class_weight_dict)
+
     callbacks = [
         EarlyStopping(patience=5, restore_best_weights=True),
         ModelCheckpoint(MODEL_SAVE_PATH, save_best_only=True)
@@ -65,11 +81,12 @@ def main():
 
     print("🚀 学習開始...")
     history = model.fit(
-        X_train, y_train,
-        validation_data=(X_val, y_val),
+        X_train, tf.keras.utils.to_categorical(y_train, num_classes=3),
+        validation_data=(X_val, tf.keras.utils.to_categorical(y_val, num_classes=3)),
         epochs=EPOCHS,
         batch_size=BATCH_SIZE,
-        callbacks=callbacks
+        callbacks=callbacks,
+        class_weight=class_weight_dict
     )
 
     print("✅ 学習完了！モデル保存済み:", MODEL_SAVE_PATH)

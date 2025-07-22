@@ -1,6 +1,7 @@
 ﻿import numpy as np
 from sklearn.metrics import classification_report, confusion_matrix
 from tensorflow.keras.models import load_model
+import tensorflow as tf
 
 from data_loader import load_tick_data
 from feature_engineering import generate_features
@@ -13,10 +14,10 @@ config = load_config("config.json")
 
 TP_PIPS = config["tp_pips"]
 SL_PIPS = config["sl_pips"]
-SEQUENCE_LENGTH = config["sequence_length"]
+SEQUENCE_LENGTH = config["train"]["sequence_length"]
 MODEL_PATH = config["model_path"]
 DATA_PATH = config["tick_data_path"]
-TEST_SIZE = config.get("eval_test_size", 0.2)
+EVAL_TEST_SIZE = config.get("eval_test_size", 0.2)
 
 def main():
     print("📥 ティックデータ読み込み...")
@@ -29,8 +30,8 @@ def main():
     print("📐 シーケンス形式へ変換...")
     X, y = prepare_sequences(features, labels, SEQUENCE_LENGTH)
 
-    # 時系列順にテストデータ抽出
-    test_size = int(len(X) * TEST_SIZE)
+    print("🧪 評価用データ抽出...")
+    test_size = int(len(X) * EVAL_TEST_SIZE)
     X_test = X[-test_size:]
     y_test = y[-test_size:]
 
@@ -38,12 +39,16 @@ def main():
     model = load_model(MODEL_PATH)
 
     print("🔮 予測実行...")
-    y_pred = model.predict(X_test)
-    y_pred_labels = np.argmax(y_pred, axis=1)
-    y_true_labels = np.argmax(y_test, axis=1)
+    y_pred_proba = model.predict(X_test)
+    y_pred_labels = np.argmax(y_pred_proba, axis=1)
+    y_true_labels = np.argmax(y_test, axis=1)  # ← 🔧ここが修正ポイント！
 
     print("📊 分類レポート:")
-    print(classification_report(y_true_labels, y_pred_labels, target_names=["NO_TRADE", "BUY", "SELL"]))
+    print(classification_report(
+        y_true_labels, y_pred_labels,
+        target_names=["NO_TRADE", "BUY", "SELL"],
+        zero_division=0
+    ))
 
     print("🧮 混同行列:")
     print(confusion_matrix(y_true_labels, y_pred_labels))
