@@ -1,4 +1,4 @@
-﻿{
+{
   "model_path": "models/best_model.h5",
   "tick_data_path": "data/usdjpy_ticks.csv",
   "sequence_length": 30,
