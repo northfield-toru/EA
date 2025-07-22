@@ -2,9 +2,9 @@
   "model_path": "models/best_model.h5",
   "tick_data_path": "data/usdjpy_ticks.csv",
   "sequence_length": 30,
-  "tp_pips": 4.0,
-  "sl_pips": 6.0,
-  "confidence_threshold": 0.58,
+  "tp_pips": 2.0,
+  "sl_pips": 4.0,
+  "confidence_threshold": 0.5,
   "spread_pips": 0.7,
   "train_ratio": 0.7,
   "val_ratio": 0.15,
@@ -16,13 +16,16 @@
   "eval_test_size": 0.2,
 
   "train": {
-    "sequence_length": 30,
     "epochs": 50,
     "batch_size": 64,
     "test_size": 0.2,
     "val_size": 0.2,
     "learning_rate": 0.001,
     "model_save_path": "models/best_model.h5",
-    "data_path": "data/usdjpy_ticks.csv"
+    "data_path": "data/usdjpy_ticks.csv",
+    "tp_pips": 2.0,
+    "sl_pips": 4.0,
+    "confidence_threshold": 0.5,
+    "sequence_length": 30
   }
 }
