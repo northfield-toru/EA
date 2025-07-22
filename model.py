@@ -4,7 +4,7 @@ from tensorflow.keras.layers import Conv1D, MaxPooling1D, Flatten, Dense, Dropou
 
 def build_model(input_shape, learning_rate=0.001):
     """
-    Conv1Dベースのシンプルな3クラス分類モデル
+    Conv1Dベースのシンプルな3クラス分類モデル（sparse categorical対応）
     """
     model = Sequential([
         Conv1D(64, kernel_size=3, activation='relu', input_shape=input_shape),
@@ -24,6 +24,10 @@ def build_model(input_shape, learning_rate=0.001):
     ])
 
     optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
-    model.compile(loss='categorical_crossentropy', optimizer=optimizer, metrics=['accuracy'])
+    model.compile(
+        loss='sparse_categorical_crossentropy',
+        optimizer=optimizer,
+        metrics=['accuracy']
+    )
 
     return model

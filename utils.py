@@ -1,49 +1,22 @@
 ﻿import json
 import numpy as np
 import matplotlib.pyplot as plt
+import pandas as pd
 
 def load_config(path: str) -> dict:
-    """
-    JSON形式の設定ファイルを読み込む
-
-    Parameters:
-        path (str): 設定ファイルのパス
-
-    Returns:
-        dict: 設定情報
-    """
     with open(path, "r", encoding="utf-8") as f:
-        config = json.load(f)
-    return config
+        return json.load(f)
 
 
 def prepare_sequences(features: np.ndarray, labels: np.ndarray, sequence_length: int):
-    """
-    特徴量とラベルをシーケンス形式に変換（LSTMなどの入力用）
-
-    Parameters:
-        features (np.ndarray): 特徴量（行数: 時系列長）
-        labels (np.ndarray): ラベル
-        sequence_length (int): シーケンスの長さ
-
-    Returns:
-        Tuple[np.ndarray, np.ndarray]: 入力シーケンス, 対応するラベル
-    """
     X, y = [], []
     for i in range(sequence_length, len(features)):
         X.append(features[i-sequence_length:i])
         y.append(labels[i])
-    return np.array(X), np.array(y)
+    return np.array(X, dtype=np.float32), np.array(y)
 
 
 def save_history_plot(history, path: str):
-    """
-    学習履歴（損失・精度）を画像として保存
-
-    Parameters:
-        history: モデル学習履歴（historyオブジェクト）
-        path (str): 保存先パス（例: "history.png"）
-    """
     plt.figure(figsize=(12, 4))
 
     # Loss
@@ -67,3 +40,34 @@ def save_history_plot(history, path: str):
     plt.tight_layout()
     plt.savefig(path)
     plt.close()
+
+
+def load_tick_data(path, time_format="combined", timezone="Asia/Tokyo"):
+    df = pd.read_csv(path, sep="\t")
+
+    # ✅ 応急処置：カラム名の自動リネーム
+    df.columns = [col.strip("<>").lower() for col in df.columns]
+
+    # ✅ 時間列の処理
+    if time_format == "combined":
+        df["time"] = pd.to_datetime(df["time"])
+    elif time_format == "separated":
+        df["time"] = pd.to_datetime(df["date"] + " " + df["time"])
+        df.drop(columns=["date"], inplace=True)
+    else:
+        raise ValueError("time_column_format must be 'combined' or 'separated'")
+
+    # ✅ bid/ask 数値化とNaN除去
+    df["bid"] = pd.to_numeric(df["bid"], errors="coerce")
+    df["ask"] = pd.to_numeric(df["ask"], errors="coerce")
+    df = df.dropna(subset=["bid", "ask"])
+
+    # ✅ タイムゾーン処理とソート
+    df["time"] = df["time"].dt.tz_localize("UTC").dt.tz_convert(timezone)
+    df = df.sort_values("time").reset_index(drop=True)
+
+    # ✅ mid計算とインデックス化
+    df["mid"] = (df["bid"] + df["ask"]) / 2
+    df = df.set_index("time")
+
+    return df

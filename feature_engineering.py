@@ -6,7 +6,7 @@ def generate_features(df: pd.DataFrame) -> pd.DataFrame:
     MID価格をもとにテクニカル指標を計算し、DataFrameに追加。
 
     Parameters:
-        df (pd.DataFrame): ['timestamp', 'bid', 'ask', 'mid']列を含むティックデータ
+        df (pd.DataFrame): ['bid', 'ask', 'mid']列を含むティックデータ
 
     Returns:
         pd.DataFrame: テクニカル指標を追加したDataFrame
@@ -70,8 +70,12 @@ def generate_features(df: pd.DataFrame) -> pd.DataFrame:
     # ===============================
     # 欠損除去
     # ===============================
-    df.dropna(inplace=True)
+    df = df.iloc[60:].copy()
 
-    df = df.drop(columns=['timestamp'])
+    # ===============================
+    # 不要列の削除（あれば）
+    # ===============================
+    if 'timestamp' in df.columns:
+        df = df.drop(columns=['timestamp'])
 
     return df
