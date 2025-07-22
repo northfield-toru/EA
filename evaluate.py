@@ -30,7 +30,7 @@ def main():
     X, y = prepare_sequences(features, labels, SEQUENCE_LENGTH)
 
     # 時系列順にテストデータ抽出
-    test_size = int(len(X) * EVAL_TEST_SIZE)
+    test_size = int(len(X) * TEST_SIZE)
     X_test = X[-test_size:]
     y_test = y[-test_size:]
 
