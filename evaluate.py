@@ -22,7 +22,7 @@ def main():
 
     print("🛠️ 特徴量・ラベル生成...")
     features = generate_features(tick_data)
-    labels = create_labels(tick_data)
+    labels = create_labels(tick_data, tp_pips=TP_PIPS, sl_pips=SL_PIPS)
 
     print("📐 シーケンス形式へ変換...")
     X, y = prepare_sequences(features, labels, SEQUENCE_LENGTH)
