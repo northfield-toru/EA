@@ -44,7 +44,7 @@ def main():
     features = generate_features(tick_data)
 
     print("🏷️ ラベル生成中...")
-    labels = create_labels(tick_data)
+    labels = create_labels(tick_data, tp_pips=TP_PIPS, sl_pips=SL_PIPS)
 
     print("📐 シーケンス準備中...")
     X, y = prepare_sequences(features, labels, SEQUENCE_LENGTH)
