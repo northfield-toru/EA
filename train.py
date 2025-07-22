@@ -1,40 +1,30 @@
 ﻿import numpy as np
+import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
-import os
-from sklearn.model_selection import train_test_split
-from sklearn.utils import class_weight
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.callbacks import ModelCheckpoint
+from sklearn.utils.class_weight import compute_class_weight
 from collections import Counter
 
 from data_loader import load_tick_data
 from feature_engineering import generate_features
 from labeling import create_labels
-from model import build_model
-from utils import load_config
+from utils import load_config, prepare_sequences
 
-# 設定ファイル読み込み
+# 設定読み込み
 config = load_config("config.json")
+TRAIN_CONFIG = config["train"]
 
-# 設定の読み込み
+MODEL_SAVE_PATH = TRAIN_CONFIG["model_save_path"]
+DATA_PATH = TRAIN_CONFIG["data_path"]
+SEQUENCE_LENGTH = config["sequence_length"]
 TP_PIPS = config["tp_pips"]
 SL_PIPS = config["sl_pips"]
 CONFIDENCE_THRESHOLD = config["confidence_threshold"]
-SEQUENCE_LENGTH = config["sequence_length"]
-DATA_PATH = config["tick_data_path"]
-
-EPOCHS = config["train"]["epochs"]
-BATCH_SIZE = config["train"]["batch_size"]
-TEST_SIZE = config["train"]["test_size"]
-VAL_SIZE = config["train"]["val_size"]
-LEARNING_RATE = config["train"]["learning_rate"]
-MODEL_SAVE_PATH = config["train"]["model_save_path"]
-
-def prepare_sequences(features, labels, sequence_length):
-    X, y = [], []
-    for i in range(sequence_length, len(features)):
-        X.append(features[i-sequence_length:i])
-        y.append(labels[i])
-    return np.array(X), np.array(y)
+EPOCHS = TRAIN_CONFIG["epochs"]
+BATCH_SIZE = TRAIN_CONFIG["batch_size"]
+VAL_RATIO = config["val_ratio"]
 
 def main():
     print("📥 ティックデータ読み込み中...")
@@ -45,64 +35,65 @@ def main():
 
     print("🏷️ ラベル生成中...")
     labels = create_labels(tick_data, tp_pips=TP_PIPS, sl_pips=SL_PIPS)
-    print("🔍 ラベル分布（元）:", Counter(labels))
 
-    # ✅ NO_TRADE（クラス2）をダウンサンプリングしてクラスバランスを調整
-    labels = np.array(labels)
-    features = features.reset_index(drop=True)
+    print("🔍 ラベル分布（元）:", Counter(labels.flatten() if labels.ndim > 1 else labels))
 
-    idx_no_trade = np.where(labels == 2)[0]
-    idx_buy = np.where(labels == 0)[0]
-    idx_sell = np.where(labels == 1)[0]
+    # データ整合性のため特徴量とラベルの行数を一致させる
+    min_len = min(len(features), len(labels))
+    features = features.iloc[-min_len:].reset_index(drop=True)
+    labels = labels[-min_len:]
 
-    max_no_trade = (len(idx_buy) + len(idx_sell)) * 2
-    np.random.seed(42)
-    selected_no_trade = np.random.choice(idx_no_trade, size=min(max_no_trade, len(idx_no_trade)), replace=False)
+    # クラスバランス調整（NO_TRADEダウンサンプリング）
+    df_combined = pd.DataFrame(features)
+    df_combined["label"] = labels
 
-    selected_indices = np.concatenate([idx_buy, idx_sell, selected_no_trade])
-    selected_indices.sort()
+    no_trade_df = df_combined[df_combined["label"] == 2]
+    other_df = df_combined[df_combined["label"] != 2]
 
-    features = features.iloc[selected_indices]
-    labels = labels[selected_indices]
+    no_trade_sampled = no_trade_df.sample(n=min(len(no_trade_df), len(other_df)*3), random_state=42)
+    balanced_df = pd.concat([other_df, no_trade_sampled]).sample(frac=1, random_state=42).reset_index(drop=True)
+
+    features = balanced_df.drop("label", axis=1)
+    labels = balanced_df["label"]
+
     print("🔍 ラベル分布（調整後）:", Counter(labels))
 
     print("📐 シーケンス準備中...")
     X, y = prepare_sequences(features, labels, SEQUENCE_LENGTH)
 
     print("📊 データ分割中...")
-    X_temp, X_test, y_temp, y_test = train_test_split(X, y, test_size=TEST_SIZE, shuffle=False)
-    val_ratio = VAL_SIZE / (1 - TEST_SIZE)
-    X_train, X_val, y_train, y_val = train_test_split(X_temp, y_temp, test_size=val_ratio, shuffle=False)
+    val_size = int(len(X) * VAL_RATIO)
+    X_train, X_val = X[:-val_size], X[-val_size:]
+    y_train, y_val = y[:-val_size], y[-val_size:]
 
     print("🧠 モデル構築中...")
-    input_shape = (X_train.shape[1], X_train.shape[2])
-    model = build_model(input_shape, learning_rate=LEARNING_RATE)
+    model = Sequential()
+    model.add(LSTM(64, input_shape=(SEQUENCE_LENGTH, X.shape[2])))
+    model.add(Dropout(0.2))
+    model.add(Dense(32, activation='relu'))
+    model.add(Dense(3, activation='softmax'))
 
-    # ✅ クラス重みを自動計算
-    class_weights = class_weight.compute_class_weight(
-        class_weight='balanced',
-        classes=np.unique(y_train),
-        y=y_train
-    )
+    model.compile(optimizer=tf.keras.optimizers.Adam(), loss='categorical_crossentropy', metrics=['accuracy'])
+
+    # クラス重み計算
+    class_weights = compute_class_weight(class_weight='balanced', classes=np.unique(np.argmax(y_train, axis=1)), y=np.argmax(y_train, axis=1))
     class_weights_dict = {i: w for i, w in enumerate(class_weights)}
     print("📏 クラス重み:", class_weights_dict)
 
-    callbacks = [
-        EarlyStopping(patience=5, restore_best_weights=True),
-        ModelCheckpoint(MODEL_SAVE_PATH, save_best_only=True)
-    ]
+    checkpoint = ModelCheckpoint(MODEL_SAVE_PATH, monitor='val_loss', save_best_only=True, verbose=1)
 
     print("🚀 学習開始...")
     history = model.fit(
-        X_train, tf.keras.utils.to_categorical(y_train),
-        validation_data=(X_val, tf.keras.utils.to_categorical(y_val)),
+        X_train, y_train,
+        validation_data=(X_val, y_val),
         epochs=EPOCHS,
         batch_size=BATCH_SIZE,
-        callbacks=callbacks,
-        class_weight=class_weights_dict
+        class_weight=class_weights_dict,
+        callbacks=[checkpoint],
+        verbose=1
     )
 
-    print("✅ 学習完了！モデル保存済み:", MODEL_SAVE_PATH)
+    print(f"✅ 学習完了！モデル保存済み: {MODEL_SAVE_PATH}")
 
 if __name__ == "__main__":
     main()
