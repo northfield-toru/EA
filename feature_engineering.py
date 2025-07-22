@@ -72,4 +72,6 @@ def generate_features(df: pd.DataFrame) -> pd.DataFrame:
     # ===============================
     df.dropna(inplace=True)
 
+    df = df.drop(columns=['timestamp'])
+
     return df
