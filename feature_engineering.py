@@ -1,7 +1,7 @@
 ﻿import pandas as pd
 import numpy as np
 
-def compute_features(df: pd.DataFrame) -> pd.DataFrame:
+def generate_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     MID価格をもとにテクニカル指標を計算し、DataFrameに追加。
 
