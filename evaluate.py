@@ -11,10 +11,12 @@ from utils import load_config
 # 設定ファイル読み込み
 config = load_config("config.json")
 
+TP_PIPS = config["tp_pips"]
+SL_PIPS = config["sl_pips"]
 SEQUENCE_LENGTH = config["sequence_length"]
 MODEL_PATH = config["model_path"]
 DATA_PATH = config["tick_data_path"]
-EVAL_TEST_SIZE = config.get("eval_test_size", 0.2)  # デフォルト0.2（20%）
+TEST_SIZE = config.get("eval_test_size", 0.2)
 
 def main():
     print("📥 ティックデータ読み込み...")
