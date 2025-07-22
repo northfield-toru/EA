@@ -6,7 +6,7 @@ def create_labels(df, future_window=100, tp_pips=8.0, sl_pips=4.0):
     """
     ティックデータからラベル（BUY/SELL/NO_TRADE）を生成
     """
-    mid_prices = (df['BID'] + df['ASK']) / 2
+    mid_prices = df['mid']
     labels = []
 
     for i in range(len(mid_prices)):
