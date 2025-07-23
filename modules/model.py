@@ -303,7 +303,7 @@ class ScalpingModel:
         
         return self.model
     
-    def compile_model(self, class_weights: Dict[int, float] = None):
+    def compile_model(self):
         """
         モデルのコンパイル
         """
@@ -313,11 +313,8 @@ class ScalpingModel:
             clipnorm=1.0  # 勾配クリッピング
         )
         
-        # 損失関数（クラス重み対応）
-        if class_weights:
-            loss = tf.keras.losses.SparseCategoricalCrossentropy()
-        else:
-            loss = 'sparse_categorical_crossentropy'
+        # 損失関数
+        loss = 'sparse_categorical_crossentropy'
         
         # メトリクス
         metrics = [

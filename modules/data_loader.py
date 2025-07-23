@@ -1,6 +1,6 @@
 ﻿import pandas as pd
 import numpy as np
-from typing import Dict, Any, Iterator, Tuple
+from typing import Dict, Any, Iterator, Tuple, List
 import logging
 import os
 from datetime import datetime
@@ -42,22 +42,47 @@ class TickDataLoader:
             # ファイル形式の判定
             separator = self._detect_separator(file_path)
             
+            # まず先頭行を読んでカラム名を確認
+            sample_df = pd.read_csv(file_path, sep=separator, nrows=1)
+            actual_columns = sample_df.columns.tolist()
+            logger.info(f"実際のカラム名: {actual_columns}")
+            
+            # カラム名のマッピングを作成
+            column_mapping = self._create_column_mapping(actual_columns)
+            logger.info(f"カラムマッピング: {column_mapping}")
+            
+            # 使用するカラムを実際のカラム名に変換
+            actual_use_columns = [column_mapping.get(col, col) for col in self.use_columns]
+            existing_columns = [col for col in actual_use_columns if col in actual_columns]
+            
+            if len(existing_columns) < 4:
+                logger.warning(f"必要なカラムが不足しています。使用可能: {existing_columns}")
+                # 最低限BIDとASKがあれば処理を続行
+                if not any('bid' in col.lower() for col in actual_columns) or not any('ask' in col.lower() for col in actual_columns):
+                    raise ValueError("BIDまたはASKカラムが見つかりません")
+            
             # データ読み込み
+            dtype_dict = {}
+            for col in existing_columns:
+                if any(price_col in col.lower() for price_col in ['bid', 'ask', 'price']):
+                    dtype_dict[col] = 'float64'
+                else:
+                    dtype_dict[col] = 'str'
+            
             df = pd.read_csv(
                 file_path,
                 sep=separator,
-                usecols=self.use_columns,
-                dtype={
-                    'BID': 'float64',
-                    'ASK': 'float64',
-                    'DATE': 'str',
-                    'TIME': 'str'
-                },
+                usecols=existing_columns,
+                dtype=dtype_dict,
                 engine='c',  # 高速化
                 low_memory=False
             )
             
+            # カラム名を標準形式に統一
+            df = self._standardize_column_names(df, column_mapping)
+            
             logger.info(f"データ読み込み完了: {len(df):,} レコード")
+            logger.info(f"使用カラム: {df.columns.tolist()}")
             logger.info(f"メモリ使用量: {memory_usage_mb():.1f}MB")
             
             # データ検証
@@ -72,6 +97,92 @@ class TickDataLoader:
         except Exception as e:
             logger.error(f"データ読み込みエラー: {e}")
             raise
+    
+    def _create_column_mapping(self, actual_columns: list) -> dict:
+        """
+        実際のカラム名から標準カラム名へのマッピングを作成
+        """
+        mapping = {}
+        
+        # 各カラムについて最適なマッチングを探す
+        for target_col in self.use_columns:
+            best_match = None
+            
+            # 完全一致を最優先
+            if target_col in actual_columns:
+                best_match = target_col
+            else:
+                # 部分一致・大小文字無視で検索
+                target_lower = target_col.lower()
+                for actual_col in actual_columns:
+                    actual_lower = actual_col.lower()
+                    
+                    if target_lower == actual_lower:
+                        best_match = actual_col
+                        break
+                    elif target_lower in actual_lower or actual_lower in target_lower:
+                        # より具体的なマッチング
+                        if target_col == 'DATE' and any(keyword in actual_lower for keyword in ['date', 'dt']):
+                            best_match = actual_col
+                        elif target_col == 'TIME' and any(keyword in actual_lower for keyword in ['time', 'tm']):
+                            best_match = actual_col
+                        elif target_col == 'BID' and 'bid' in actual_lower:
+                            best_match = actual_col
+                        elif target_col == 'ASK' and 'ask' in actual_lower:
+                            best_match = actual_col
+            
+            if best_match:
+                mapping[target_col] = best_match
+            else:
+                # デフォルトの推測
+                if target_col == 'DATE' and len(actual_columns) > 0:
+                    mapping[target_col] = actual_columns[0]  # 通常最初のカラム
+                elif target_col == 'TIME' and len(actual_columns) > 1:
+                    mapping[target_col] = actual_columns[1]  # 通常2番目のカラム
+                else:
+                    logger.warning(f"カラム {target_col} に対応する実際のカラムが見つかりません")
+        
+        return mapping
+    
+    def _standardize_column_names(self, df: pd.DataFrame, column_mapping: dict) -> pd.DataFrame:
+        """
+        カラム名を標準形式に統一
+        """
+        # 逆マッピングを作成
+        reverse_mapping = {v: k for k, v in column_mapping.items()}
+        
+        # カラム名を変更
+        df = df.rename(columns=reverse_mapping)
+        
+        # 不足しているカラムの補完
+        required_columns = ['DATE', 'TIME', 'BID', 'ASK']
+        for col in required_columns:
+            if col not in df.columns:
+                if col == 'DATE' and 'TIME' in df.columns:
+                    # TIMEカラムに日付も含まれている可能性
+                    df['DATE'] = df['TIME'].str.split(' ').str[0] if ' ' in df['TIME'].iloc[0] else '2025.01.01'
+                elif col == 'TIME' and 'DATE' in df.columns:
+                    # DATEカラムに時刻も含まれている可能性
+                    df['TIME'] = df['DATE'].str.split(' ').str[1] if ' ' in df['DATE'].iloc[0] else '00:00:00'
+                else:
+                    logger.warning(f"必須カラム {col} が見つかりません。ダミー値で補完します。")
+                    if col == 'DATE':
+                        df['DATE'] = '2025.01.01'
+                    elif col == 'TIME':
+                        df['TIME'] = df.index.astype(str) + '.000'  # インデックスベースの時刻
+                    elif col in ['BID', 'ASK']:
+                        # 他の価格カラムから推定
+                        price_cols = [c for c in df.columns if any(p in c.lower() for p in ['price', 'close', 'last'])]
+                        if price_cols:
+                            base_price = df[price_cols[0]]
+                            if col == 'BID':
+                                df['BID'] = base_price - 0.0005  # 仮のスプレッド
+                            else:  # ASK
+                                df['ASK'] = base_price + 0.0005
+                        else:
+                            df[col] = 157.0  # USDJPYのデフォルト値
+        
+        return df
     
     def load_tick_data_chunked(self, file_path: str = None) -> Iterator[pd.DataFrame]:
         """
