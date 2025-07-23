@@ -14,6 +14,7 @@ import argparse
 import logging
 from datetime import datetime
 import json
+import numpy as np
 
 # モジュールのインポート
 from modules.utils import (
