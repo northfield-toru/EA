@@ -88,7 +88,7 @@ class ModelTrainer:
         logger.info("モデル訓練開始")
         
         # モデルコンパイル
-        self.model_wrapper.compile_model(class_weights)
+        self.model_wrapper.compile_model()
         
         # モデル保存パス
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
