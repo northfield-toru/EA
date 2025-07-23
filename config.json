@@ -3,9 +3,9 @@
     "pair": "USDJPY",
     "spread_pips": 0.7,
     "pip_value": 0.01,
-    "tp_pips": 4.0,
-    "sl_pips": 5.0,
-    "future_window": 100
+    "tp_pips": 3.0,
+    "sl_pips": 6.0,
+    "future_window": 50
   },
   "data": {
     "input_file": "data/usdjpy_ticks.csv",
@@ -36,22 +36,22 @@
     },
     "sma_periods": [5, 10, 20, 50],
     "ema_periods": [5, 10, 20, 50],
-    "sequence_length": 60,
+    "sequence_length": 30,
     "lookback_window": 200
   },
   "model": {
     "architecture": "conv1d",
     "num_classes": 3,
-    "conv_filters": [64, 128, 256],
+    "conv_filters": [32, 64, 128],
     "conv_kernel_size": 3,
     "pool_size": 2,
-    "dense_units": [128, 64],
+    "dense_units": [64, 32],
     "dropout_rate": 0.3,
-    "learning_rate": 0.001,
-    "batch_size": 32,
-    "epochs": 100,
-    "early_stopping_patience": 15,
-    "reduce_lr_patience": 10
+    "learning_rate": 0.0005,
+    "batch_size": 64,
+    "epochs": 50,
+    "early_stopping_patience": 8,
+    "reduce_lr_patience": 5
   },
   "labels": {
     "buy_class": 0,
@@ -69,6 +69,6 @@
     "random_seed": 42,
     "n_jobs": -1,
     "gpu_memory_growth": true,
-    "mixed_precision": true
+    "mixed_precision": false
   }
 }

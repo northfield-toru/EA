@@ -244,28 +244,51 @@ def run_evaluation_only(config):
         save_results(trainer, evaluation_results, config, timestamps[-len(X_test):])
         
         # サマリー表示
-        logger.info("="*50)
-        logger.info("評価結果サマリー")
-        logger.info("="*50)
-        logger.info(f"テスト精度: {evaluation_results['test_accuracy']:.4f}")
-        logger.info(f"テスト損失: {evaluation_results['test_loss']:.4f}")
+        logger.info("="*60)
+        logger.info("🎯 モデル評価結果サマリー")
+        logger.info("="*60)
+        logger.info(f"📊 基本性能:")
+        logger.info(f"   テスト精度: {evaluation_results['test_accuracy']:.1%}")
+        logger.info(f"   テスト損失: {evaluation_results['test_loss']:.4f}")
         
-        # クラス別F1スコア
+        logger.info(f"\n📈 クラス別F1スコア:")
         for class_name, f1 in evaluation_results['f1_scores'].items():
-            logger.info(f"{class_name} F1スコア: {f1:.4f}")
+            logger.info(f"   {class_name:8}: {f1:.3f}")
         
-        # 閾値別性能表示
-        logger.info("\n閾値別性能:")
-        for threshold, metrics in evaluation_results['threshold_evaluation'].items():
-            logger.info(f"閾値{threshold}: 精度={metrics['accuracy']:.3f}, "
-                       f"F1={metrics['f1_score']:.3f}, カバレッジ={metrics['coverage']:.3f}")
+        # 予測分布の確認
+        y_pred = evaluation_results['predictions']['y_pred']
+        pred_counts = np.bincount(y_pred)
+        class_names = config['labels']['class_names']
+        logger.info(f"\n🔍 予測分布（問題診断用）:")
+        for i, count in enumerate(pred_counts):
+            if i < len(class_names):
+                logger.info(f"   {class_names[i]:8}: {count:,} ({count/len(y_pred)*100:.1f}%)")
+        
+        # 予測信頼度の統計
+        y_proba = np.array(evaluation_results['predictions']['y_pred_proba'])
+        max_confidences = np.max(y_proba, axis=1)
+        logger.info(f"\n📊 予測信頼度統計:")
+        logger.info(f"   最小信頼度: {np.min(max_confidences):.3f}")
+        logger.info(f"   最大信頼度: {np.max(max_confidences):.3f}")
+        logger.info(f"   平均信頼度: {np.mean(max_confidences):.3f}")
+        logger.info(f"   信頼度0.6以上: {np.sum(max_confidences >= 0.6):,} ({np.sum(max_confidences >= 0.6)/len(max_confidences)*100:.1f}%)")
+        
+        # 閾値別性能表示（主要な閾値のみ）
+        logger.info(f"\n📋 閾値別性能:")
+        key_thresholds = ['0.1', '0.3', '0.5', '0.7', '0.9']
+        for threshold in key_thresholds:
+            if threshold in evaluation_results['threshold_evaluation']:
+                metrics = evaluation_results['threshold_evaluation'][threshold]
+                logger.info(f"   閾値{threshold}: 精度={metrics['accuracy']:.3f}, "
+                           f"F1={metrics['f1_score']:.3f}, カバレッジ={metrics['coverage']:.3f}")
         
         # 最適閾値の推奨
         best_threshold = get_best_threshold(evaluation_results['threshold_evaluation'])
-        logger.info(f"\n推奨信頼度閾値: {best_threshold}")
+        logger.info(f"\n💡 推奨信頼度閾値: {best_threshold}")
         
-        logger.info("="*50)
-        logger.info("評価レポートと可視化ファイルが models/ フォルダに保存されました。")
+        logger.info("="*60)
+        logger.info("📁 出力ファイルが models/evaluation_report/ に保存されました")
+        logger.info("="*60)
         
     except Exception as e:
         logger.error(f"評価中にエラーが発生: {e}")
@@ -332,6 +355,18 @@ def save_results(trainer, evaluation_results, config, timestamps):
             threshold_plot_path
         )
         
+        # オーダー数分布グラフ（新機能）
+        order_dist_plot_path = os.path.join(output_dir, f"order_distribution_{timestamp}.png")
+        order_distribution_df = trainer.plot_order_distribution_by_class(
+            evaluation_results,
+            order_dist_plot_path
+        )
+        
+        # オーダー分布データもCSVで保存
+        order_dist_csv_path = os.path.join(output_dir, f"order_distribution_{timestamp}.csv")
+        order_distribution_df.to_csv(order_dist_csv_path, index=False)
+        logger.info(f"オーダー分布データ保存: {order_dist_csv_path}")
+        
     except Exception as e:
         logger.warning(f"可視化でエラーが発生: {e}")
     
@@ -390,6 +425,8 @@ def save_results(trainer, evaluation_results, config, timestamps):
     logger.info(f"  - 評価レポート: evaluation_report_{timestamp}.json")
     logger.info(f"  - 混同行列: confusion_matrix_{timestamp}.png")
     logger.info(f"  - 閾値分析: threshold_analysis_{timestamp}.png")
+    logger.info(f"  - オーダー分布グラフ: order_distribution_{timestamp}.png")
+    logger.info(f"  - オーダー分布データ: order_distribution_{timestamp}.csv")
     logger.info(f"  - パフォーマンス要約: performance_summary_{timestamp}.json")
     if config['evaluation']['export_format'] == 'csv':
         logger.info(f"  - 取引シグナル: trading_signals_{timestamp}.csv")

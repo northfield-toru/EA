@@ -207,13 +207,13 @@ class ModelTrainer:
         threshold_results = {}
         
         for threshold in thresholds:
-            # 閾値適用予測
-            pred_filtered, confidences, _ = self.model_wrapper.predict_with_confidence(
-                X_test, threshold
-            )
+            # 最大予測確率を取得
+            max_confidences = np.max(y_pred_proba, axis=1)
+            predicted_classes = np.argmax(y_pred_proba, axis=1)
             
-            # 高信頼度サンプルのみで評価
-            high_conf_mask = confidences >= threshold
+            # 高信頼度サンプルのマスク
+            high_conf_mask = max_confidences >= threshold
+            
             if high_conf_mask.sum() == 0:
                 threshold_results[str(threshold)] = {
                     'num_predictions': 0,
@@ -223,18 +223,25 @@ class ModelTrainer:
                 }
                 continue
             
+            # 高信頼度サンプルでの評価
             y_test_filtered = y_test[high_conf_mask]
-            y_pred_filtered = pred_filtered[high_conf_mask]
+            y_pred_filtered = predicted_classes[high_conf_mask]
             
-            accuracy = np.mean(y_test_filtered == y_pred_filtered)
-            f1 = f1_score(y_test_filtered, y_pred_filtered, average='weighted', zero_division=0)
+            # 低信頼度のものはNO_TRADEクラス(2)に変更
+            y_pred_with_threshold = predicted_classes.copy()
+            y_pred_with_threshold[~high_conf_mask] = self.labels_config['no_trade_class']
+            
+            # 全データでの評価（閾値適用後）
+            accuracy = np.mean(y_test == y_pred_with_threshold)
+            f1 = f1_score(y_test, y_pred_with_threshold, average='weighted', zero_division=0)
             coverage = high_conf_mask.sum() / len(y_test)
             
             threshold_results[str(threshold)] = {
                 'num_predictions': int(high_conf_mask.sum()),
                 'accuracy': float(accuracy),
                 'f1_score': float(f1),
-                'coverage': float(coverage)
+                'coverage': float(coverage),
+                'high_conf_accuracy': float(np.mean(y_test_filtered == y_pred_filtered)) if len(y_test_filtered) > 0 else 0.0
             }
         
         return threshold_results
@@ -335,27 +342,65 @@ class ModelTrainer:
         accuracies = [threshold_results[t]['accuracy'] for t in thresholds]
         f1_scores = [threshold_results[t]['f1_score'] for t in thresholds]
         coverages = [threshold_results[t]['coverage'] for t in thresholds]
+        num_predictions = [threshold_results[t]['num_predictions'] for t in thresholds]
         
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+        fig.suptitle('閾値分析結果', fontsize=16, fontweight='bold')
         
-        # 精度とF1スコア
-        ax1.plot(thresholds, accuracies, marker='o', label='Accuracy')
-        ax1.plot(thresholds, f1_scores, marker='s', label='F1 Score')
-        ax1.set_title('Performance vs Confidence Threshold')
-        ax1.set_xlabel('Confidence Threshold')
-        ax1.set_ylabel('Score')
+        # 1. 精度とF1スコア
+        ax1.plot(thresholds, accuracies, marker='o', linewidth=2, label='精度 (Accuracy)', color='blue')
+        ax1.plot(thresholds, f1_scores, marker='s', linewidth=2, label='F1スコア', color='orange')
+        ax1.set_title('性能 vs 信頼度閾値')
+        ax1.set_xlabel('信頼度閾値')
+        ax1.set_ylabel('スコア')
         ax1.legend()
-        ax1.grid(True)
+        ax1.grid(True, alpha=0.3)
         ax1.set_ylim(0, 1)
         
-        # カバレッジ
-        ax2.plot(thresholds, coverages, marker='D', color='green', label='Coverage')
-        ax2.set_title('Coverage vs Confidence Threshold')
-        ax2.set_xlabel('Confidence Threshold')
-        ax2.set_ylabel('Coverage Ratio')
+        # 値をプロット上に表示
+        for i, (thresh, acc, f1) in enumerate(zip(thresholds, accuracies, f1_scores)):
+            ax1.annotate(f'{acc:.2f}', (thresh, acc), textcoords="offset points", xytext=(0,10), ha='center', fontsize=8)
+            ax1.annotate(f'{f1:.2f}', (thresh, f1), textcoords="offset points", xytext=(0,-15), ha='center', fontsize=8)
+        
+        # 2. カバレッジ
+        ax2.plot(thresholds, coverages, marker='D', linewidth=2, color='green', label='カバレッジ')
+        ax2.set_title('カバレッジ vs 信頼度閾値')
+        ax2.set_xlabel('信頼度閾値')
+        ax2.set_ylabel('カバレッジ比率')
         ax2.legend()
-        ax2.grid(True)
+        ax2.grid(True, alpha=0.3)
         ax2.set_ylim(0, 1)
+        
+        # 値をプロット上に表示
+        for i, (thresh, cov) in enumerate(zip(thresholds, coverages)):
+            ax2.annotate(f'{cov:.2f}', (thresh, cov), textcoords="offset points", xytext=(0,10), ha='center', fontsize=8)
+        
+        # 3. 取引機会数（オーダー数分布）
+        ax3.bar(thresholds, num_predictions, alpha=0.7, color='purple', edgecolor='black')
+        ax3.set_title('取引機会数 vs 信頼度閾値')
+        ax3.set_xlabel('信頼度閾値')
+        ax3.set_ylabel('取引機会数')
+        ax3.grid(True, alpha=0.3, axis='y')
+        
+        # 各バーの上に数値を表示
+        for i, (thresh, count) in enumerate(zip(thresholds, num_predictions)):
+            ax3.annotate(f'{count:,}', (thresh, count), textcoords="offset points", 
+                        xytext=(0,5), ha='center', fontsize=9, fontweight='bold')
+        
+        # 4. 取引機会率（パーセンテージ）
+        total_samples = max(num_predictions) if num_predictions else 1
+        trade_rates = [count/total_samples*100 for count in num_predictions]
+        
+        bars = ax4.bar(thresholds, trade_rates, alpha=0.7, color='red', edgecolor='black')
+        ax4.set_title('取引機会率 vs 信頼度閾値')
+        ax4.set_xlabel('信頼度閾値')
+        ax4.set_ylabel('取引機会率 (%)')
+        ax4.grid(True, alpha=0.3, axis='y')
+        
+        # 各バーの上にパーセンテージを表示
+        for i, (thresh, rate) in enumerate(zip(thresholds, trade_rates)):
+            ax4.annotate(f'{rate:.1f}%', (thresh, rate), textcoords="offset points", 
+                        xytext=(0,5), ha='center', fontsize=9, fontweight='bold')
         
         plt.tight_layout()
         
@@ -364,6 +409,74 @@ class ModelTrainer:
             logger.info(f"閾値分析グラフ保存: {save_path}")
         
         plt.close()  # メモリリーク防止
+    
+    def plot_order_distribution_by_class(self, evaluation_results: Dict[str, Any], save_path: str = None):
+        """
+        クラス別・閾値別のオーダー数分布を可視化
+        """
+        threshold_results = evaluation_results['threshold_evaluation']
+        y_pred_proba = np.array(evaluation_results['predictions']['y_pred_proba'])
+        y_pred = np.array(evaluation_results['predictions']['y_pred'])
+        
+        thresholds = list(threshold_results.keys())
+        class_names = self.labels_config['class_names']
+        
+        # 各閾値・各クラスでの予測数を計算
+        distribution_data = []
+        
+        for threshold in thresholds:
+            thresh_val = float(threshold)
+            max_confidences = np.max(y_pred_proba, axis=1)
+            high_conf_mask = max_confidences >= thresh_val
+            
+            # 高信頼度での各クラス予測数
+            high_conf_predictions = y_pred[high_conf_mask]
+            
+            for class_idx, class_name in enumerate(class_names):
+                count = np.sum(high_conf_predictions == class_idx)
+                distribution_data.append({
+                    'threshold': threshold,
+                    'class': class_name,
+                    'count': count
+                })
+        
+        # データフレーム作成
+        df_dist = pd.DataFrame(distribution_data)
+        
+        # 可視化
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+        fig.suptitle('クラス別・閾値別 オーダー数分布', fontsize=16, fontweight='bold')
+        
+        # 1. 積み上げ棒グラフ
+        pivot_data = df_dist.pivot(index='threshold', columns='class', values='count')
+        pivot_data.plot(kind='bar', stacked=True, ax=ax1, 
+                       color=['lightblue', 'lightcoral', 'lightgreen'])
+        ax1.set_title('積み上げ式オーダー数分布')
+        ax1.set_xlabel('信頼度閾値')
+        ax1.set_ylabel('オーダー数')
+        ax1.legend(title='クラス')
+        ax1.grid(True, alpha=0.3, axis='y')
+        ax1.tick_params(axis='x', rotation=0)
+        
+        # 2. 並列棒グラフ
+        pivot_data.plot(kind='bar', ax=ax2, 
+                       color=['blue', 'red', 'green'], alpha=0.7)
+        ax2.set_title('並列式オーダー数分布')
+        ax2.set_xlabel('信頼度閾値')
+        ax2.set_ylabel('オーダー数')
+        ax2.legend(title='クラス')
+        ax2.grid(True, alpha=0.3, axis='y')
+        ax2.tick_params(axis='x', rotation=0)
+        
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            logger.info(f"オーダー分布グラフ保存: {save_path}")
+        
+        plt.close()
+        
+        return df_dist
     
     def save_evaluation_report(self, evaluation_results: Dict[str, Any], report_path: str):
         """

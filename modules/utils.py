@@ -20,6 +20,11 @@ def load_config(config_path: str = 'config.json') -> Dict[str, Any]:
 
 def setup_logging(log_level: str = 'INFO') -> logging.Logger:
     """ログ設定を初期化"""
+    
+    # 外部ライブラリのログレベルを制限
+    logging.getLogger('tensorflow').setLevel(logging.ERROR)
+    logging.getLogger('matplotlib').setLevel(logging.ERROR)
+    
     logging.basicConfig(
         level=getattr(logging, log_level),
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
