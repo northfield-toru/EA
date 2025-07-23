@@ -126,22 +126,39 @@ def memory_usage_mb() -> float:
 
 def save_model_metadata(model_path: str, config: Dict[str, Any], 
                        training_history: Dict[str, Any], 
-                       feature_names: List[str] = None,
+                       feature_names: list = None,
                        scaling_params: Dict[str, Any] = None):
     """
-    モデルメタデータをJSONファイルに保存（スケーリングパラメータ対応）
+    モデルメタデータをJSONファイルに保存（NumPy型対応）
     """
+    # NumPy型をPython標準型に変換
+    def convert_numpy_types(obj):
+        if isinstance(obj, dict):
+            return {k: convert_numpy_types(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_numpy_types(item) for item in obj]
+        elif isinstance(obj, (np.float32, np.float64)):
+            return float(obj)
+        elif isinstance(obj, (np.int32, np.int64)):
+            return int(obj)
+        elif isinstance(obj, np.bool_):
+            return bool(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        else:
+            return obj
+    
     metadata = {
         "model_path": model_path,
         "config": config,
         "created_at": datetime.now().isoformat(),
         "feature_names": feature_names or [],
-        "training_history": training_history
+        "training_history": convert_numpy_types(training_history)
     }
     
     # スケーリングパラメータを追加
     if scaling_params:
-        metadata["scaling_params"] = scaling_params
+        metadata["scaling_params"] = convert_numpy_types(scaling_params)
     
     # メタデータファイルパス
     metadata_path = model_path.replace('.h5', '_metadata.json')
@@ -159,6 +176,7 @@ def save_model_metadata(model_path: str, config: Dict[str, Any],
         logger.info(f"訓練ログCSV保存完了: {log_path}")
     
     return metadata_path
+
 
 def load_model_metadata(model_path: str) -> Dict[str, Any]:
     """モデルのメタデータを読み込む"""
