@@ -2,6 +2,8 @@
 import numpy as np
 from typing import Dict, Any, Tuple
 import logging
+import json
+import os
 from .utils import calculate_mid_price, memory_usage_mb
 
 logger = logging.getLogger(__name__)
@@ -9,13 +11,17 @@ logger = logging.getLogger(__name__)
 class FeatureEngine:
     """
     ティックデータ用特徴量エンジニアリング
-    未来リーク完全防止・メモリ効率重視
+    未来リーク完全防止・スケーリング一貫性確保
     """
     
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.features_config = config['features']
         self.trading_config = config['trading']
+        
+        # スケーリングパラメータを保存するための属性
+        self.scaling_params = {}
+        self.is_fitted = False
         
     def calculate_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -179,9 +185,84 @@ class FeatureEngine:
         
         return df
     
-    def create_sequences(self, df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
+    def fit_scaler(self, df: pd.DataFrame, feature_columns: list):
         """
-        シーケンスデータの作成（時系列モデル用）
+        訓練データでスケーリングパラメータを学習
+        """
+        logger.info("スケーリングパラメータを学習中...")
+        
+        self.scaling_params = {}
+        
+        for col in feature_columns:
+            if col in df.columns:
+                col_data = df[col].dropna()
+                if len(col_data) > 0:
+                    min_val = col_data.min()
+                    max_val = col_data.max()
+                    
+                    # 分母が0になることを防ぐ
+                    if max_val != min_val:
+                        self.scaling_params[col] = {
+                            'min': float(min_val),
+                            'max': float(max_val)
+                        }
+                    else:
+                        # 定数の場合は0.5に正規化
+                        self.scaling_params[col] = {
+                            'min': float(min_val),
+                            'max': float(min_val) + 1.0  # 分母を1にして0.5になるように
+                        }
+        
+        self.is_fitted = True
+        logger.info(f"スケーリングパラメータ学習完了: {len(self.scaling_params)}個の特徴量")
+    
+    def transform_features(self, df: pd.DataFrame, feature_columns: list) -> np.ndarray:
+        """
+        学習済みスケーリングパラメータで特徴量を正規化
+        """
+        if not self.is_fitted:
+            raise ValueError("スケーラーが未学習です。fit_scaler()を先に実行してください。")
+        
+        # 特徴量データを抽出
+        feature_data = df[feature_columns].fillna(method='ffill').fillna(0).values
+        normalized_data = np.zeros_like(feature_data)
+        
+        for i, col in enumerate(feature_columns):
+            if col in self.scaling_params:
+                min_val = self.scaling_params[col]['min']
+                max_val = self.scaling_params[col]['max']
+                normalized_data[:, i] = (feature_data[:, i] - min_val) / (max_val - min_val)
+            else:
+                # パラメータがない場合は0.5で埋める
+                normalized_data[:, i] = 0.5
+        
+        return normalized_data
+    
+    def save_scaling_params(self, filepath: str):
+        """スケーリングパラメータをファイルに保存"""
+        if not self.is_fitted:
+            logger.warning("スケーリングパラメータが未学習のため保存をスキップします")
+            return
+        
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(self.scaling_params, f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"スケーリングパラメータ保存: {filepath}")
+    
+    def load_scaling_params(self, filepath: str):
+        """スケーリングパラメータをファイルから読み込み"""
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                self.scaling_params = json.load(f)
+            self.is_fitted = True
+            logger.info(f"スケーリングパラメータ読み込み完了: {filepath}")
+        except FileNotFoundError:
+            logger.warning(f"スケーリングパラメータファイルが見つかりません: {filepath}")
+            self.is_fitted = False
+    
+    def create_sequences(self, df: pd.DataFrame, is_training: bool = True) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        シーケンスデータの作成（スケーリング一貫性確保版）
         """
         sequence_length = self.features_config['sequence_length']
         
@@ -189,13 +270,12 @@ class FeatureEngine:
         feature_columns = [col for col in df.columns if col not in 
                           ['DATE', 'TIME', 'BID', 'ASK', 'datetime', 'label']]
         
-        # NaNを前方埋めで処理
-        df[feature_columns] = df[feature_columns].fillna(method='ffill')
-        df[feature_columns] = df[feature_columns].fillna(0)  # 最初のNaNは0で埋める
+        # 訓練時：スケーリングパラメータを学習
+        if is_training and not self.is_fitted:
+            self.fit_scaler(df, feature_columns)
         
-        # 正規化（各特徴量を0-1スケールに）
-        feature_data = df[feature_columns].values
-        feature_data = self._normalize_features(feature_data)
+        # 特徴量正規化（学習済みパラメータを使用）
+        normalized_data = self.transform_features(df, feature_columns)
         
         # シーケンス作成
         sequences = []
@@ -203,7 +283,7 @@ class FeatureEngine:
         labels = []
         
         for i in range(sequence_length, len(df)):
-            seq = feature_data[i-sequence_length:i]
+            seq = normalized_data[i-sequence_length:i]
             sequences.append(seq)
             timestamps.append(df.iloc[i]['datetime'] if 'datetime' in df.columns else i)
             
@@ -211,7 +291,7 @@ class FeatureEngine:
                 labels.append(df.iloc[i]['label'])
         
         X = np.array(sequences)
-        y = np.array(labels, dtype=np.int32) if labels else None  # 整数型を明示
+        y = np.array(labels, dtype=np.int32) if labels else None
         
         logger.info(f"シーケンス作成完了: {X.shape}, 特徴量数: {len(feature_columns)}")
         if y is not None:
@@ -219,25 +299,6 @@ class FeatureEngine:
             logger.info(f"ラベル分布: {np.unique(y, return_counts=True)}")
         
         return X, y, feature_columns, timestamps
-    
-    def _normalize_features(self, data: np.ndarray) -> np.ndarray:
-        """
-        特徴量正規化（Min-Maxスケーリング）
-        """
-        # 各特徴量ごとに正規化
-        normalized_data = np.zeros_like(data)
-        
-        for i in range(data.shape[1]):
-            column = data[:, i]
-            min_val = np.min(column)
-            max_val = np.max(column)
-            
-            if max_val != min_val:
-                normalized_data[:, i] = (column - min_val) / (max_val - min_val)
-            else:
-                normalized_data[:, i] = 0.5  # 定数の場合は0.5に設定
-        
-        return normalized_data
     
     def get_feature_importance_names(self) -> list:
         """特徴量の重要度分析用の名前リストを取得"""

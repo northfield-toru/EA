@@ -83,7 +83,7 @@ class ModelTrainer:
                    X_val: np.ndarray, y_val: np.ndarray,
                    feature_names: List[str] = None) -> str:
         """
-        モデル訓練実行
+        モデル訓練実行（スケーリングパラメータ保存対応）
         """
         logger.info("モデル訓練開始")
         
@@ -126,12 +126,13 @@ class ModelTrainer:
         
         self.training_history = history.history
         
-        # メタデータ保存
+        # メタデータ保存（スケーリングパラメータも含む）
         save_model_metadata(
             self.model_path,
             self.config,
             self.training_history,
-            feature_names
+            feature_names,
+            scaling_params=getattr(self, 'scaling_params', None)  # スケーリングパラメータを追加
         )
         
         logger.info(f"訓練完了 - モデル保存: {self.model_path}")

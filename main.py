@@ -124,9 +124,9 @@ def run_full_pipeline(config, sample_mode=False):
     if not label_validation['is_balanced']:
         logger.warning("ラベル分布が不均衡です。クラス重み調整を推奨します。")
     
-    # 4. シーケンスデータ作成
+    # 4. シーケンスデータ作成（スケーリング一貫性確保）
     logger.info("ステップ4: シーケンスデータ作成")
-    X, y, feature_names, timestamps = feature_engine.create_sequences(df)
+    X, y, feature_names, timestamps = feature_engine.create_sequences(df, is_training=True)
     logger.info(f"シーケンス作成完了: X.shape={X.shape}, y.shape={y.shape}")
     
     # 5. モデル訓練
@@ -134,8 +134,15 @@ def run_full_pipeline(config, sample_mode=False):
     trainer = ModelTrainer(config)
     X_train, X_val, X_test, y_train, y_val, y_test = trainer.prepare_data(X, y)
     
+    # スケーリングパラメータをトレーナーに渡す
+    trainer.scaling_params = feature_engine.scaling_params
+    
     # 訓練実行
     model_path = trainer.train_model(X_train, y_train, X_val, y_val, feature_names)
+    
+    # スケーリングパラメータを保存
+    scaling_params_path = model_path.replace('.h5', '_scaling_params.json')
+    feature_engine.save_scaling_params(scaling_params_path)
     
     # 6. モデル評価
     logger.info("ステップ6: モデル評価")
