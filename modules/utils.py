@@ -166,14 +166,14 @@ def save_model_metadata(model_path: str, config: Dict[str, Any],
     with open(metadata_path, 'w', encoding='utf-8') as f:
         json.dump(metadata, f, indent=2, ensure_ascii=False)
     
-    logger.info(f"モデルメタデータ保存完了: {metadata_path}")
+    print(f"モデルメタデータ保存完了: {metadata_path}")
     
     # 訓練ログCSVも保存
     if training_history:
         log_path = model_path.replace('.h5', '_training_log.csv')
         df_history = pd.DataFrame(training_history)
         df_history.to_csv(log_path, index=False)
-        logger.info(f"訓練ログCSV保存完了: {log_path}")
+        print(f"訓練ログCSV保存完了: {log_path}")
     
     return metadata_path
 
