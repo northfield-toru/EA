@@ -1,0 +1,56 @@
+{
+  "timestamp": "20250723_163618",
+  "test_accuracy": 0.3631892800331116,
+  "test_loss": 1.1297409534454346,
+  "best_threshold": 0.1,
+  "f1_scores": {
+    "BUY": 0.07135101597642314,
+    "SELL": 0.276783280327124,
+    "NO_TRADE": 0.4995186753946862
+  },
+  "threshold_performance": {
+    "0.1": {
+      "num_predictions": 19114,
+      "accuracy": 0.36318928534058803,
+      "f1_score": 0.3031939340177856,
+      "coverage": 1.0,
+      "high_conf_accuracy": 0.36318928534058803
+    },
+    "0.3": {
+      "num_predictions": 19114,
+      "accuracy": 0.36318928534058803,
+      "f1_score": 0.3031939340177856,
+      "coverage": 1.0,
+      "high_conf_accuracy": 0.36318928534058803
+    },
+    "0.5": {
+      "num_predictions": 3513,
+      "accuracy": 0.3859474730563984,
+      "f1_score": 0.25006620995598805,
+      "coverage": 0.1837919849325102,
+      "high_conf_accuracy": 0.3563905493879875
+    },
+    "0.7": {
+      "num_predictions": 15,
+      "accuracy": 0.39975933870461444,
+      "f1_score": 0.22926091280998165,
+      "coverage": 0.0007847650936486345,
+      "high_conf_accuracy": 1.0
+    },
+    "0.8": {
+      "num_predictions": 11,
+      "accuracy": 0.39955006801297477,
+      "f1_score": 0.2288101631164979,
+      "coverage": 0.0005754944020089986,
+      "high_conf_accuracy": 1.0
+    },
+    "0.9": {
+      "num_predictions": 0,
+      "accuracy": 0.0,
+      "f1_score": 0.0,
+      "coverage": 0.0
+    }
+  },
+  "model_path": "models/scalping_model_lstm_20250723_161339.h5",
+  "memory_usage_mb": 3996.6015625
+}
