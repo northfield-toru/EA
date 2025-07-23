@@ -131,8 +131,8 @@ class ModelTrainer:
             self.model_path,
             self.config,
             self.training_history,
-            feature_names,
-            scaling_params=getattr(self, 'scaling_params', None)  # スケーリングパラメータを追加
+            feature_names
+            #scaling_params=getattr(self, 'scaling_params', None)  # スケーリングパラメータを追加
         )
         
         logger.info(f"訓練完了 - モデル保存: {self.model_path}")

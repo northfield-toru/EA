@@ -6,6 +6,7 @@ from datetime import datetime
 import logging
 from typing import Dict, Any, Tuple, Optional
 import tensorflow as tf
+from typing import Dict, Any, List
 
 def load_config(config_path: str = 'config.json') -> Dict[str, Any]:
     """設定ファイルを読み込む"""
@@ -124,41 +125,40 @@ def memory_usage_mb() -> float:
     return process.memory_info().rss / 1024 / 1024
 
 def save_model_metadata(model_path: str, config: Dict[str, Any], 
-                       training_history: Optional[Dict] = None,
-                       feature_names: Optional[list] = None):
-    """モデルのメタデータを保存"""
-    
-    def convert_to_serializable(obj):
-        """numpy/tensorflow型をPython基本型に変換"""
-        if hasattr(obj, 'numpy'):  # TensorFlow tensor
-            return obj.numpy().tolist()
-        elif hasattr(obj, 'tolist'):  # numpy array
-            return obj.tolist()
-        elif isinstance(obj, (np.float32, np.float64)):
-            return float(obj)
-        elif isinstance(obj, (np.int32, np.int64)):
-            return int(obj)
-        elif isinstance(obj, dict):
-            return {k: convert_to_serializable(v) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [convert_to_serializable(item) for item in obj]
-        else:
-            return obj
-    
-    # メタデータ作成
+                       training_history: Dict[str, Any], 
+                       feature_names: List[str] = None,
+                       scaling_params: Dict[str, Any] = None):
+    """
+    モデルメタデータをJSONファイルに保存（スケーリングパラメータ対応）
+    """
     metadata = {
-        'model_path': model_path,
-        'config': convert_to_serializable(config),
-        'created_at': datetime.now().isoformat(),
-        'feature_names': feature_names,
-        'training_history': convert_to_serializable(training_history) if training_history else None
+        "model_path": model_path,
+        "config": config,
+        "created_at": datetime.now().isoformat(),
+        "feature_names": feature_names or [],
+        "training_history": training_history
     }
     
+    # スケーリングパラメータを追加
+    if scaling_params:
+        metadata["scaling_params"] = scaling_params
+    
+    # メタデータファイルパス
     metadata_path = model_path.replace('.h5', '_metadata.json')
+    
     with open(metadata_path, 'w', encoding='utf-8') as f:
         json.dump(metadata, f, indent=2, ensure_ascii=False)
     
-    print(f"メタデータ保存完了: {metadata_path}")
+    logger.info(f"モデルメタデータ保存完了: {metadata_path}")
+    
+    # 訓練ログCSVも保存
+    if training_history:
+        log_path = model_path.replace('.h5', '_training_log.csv')
+        df_history = pd.DataFrame(training_history)
+        df_history.to_csv(log_path, index=False)
+        logger.info(f"訓練ログCSV保存完了: {log_path}")
+    
+    return metadata_path
 
 def load_model_metadata(model_path: str) -> Dict[str, Any]:
     """モデルのメタデータを読み込む"""
