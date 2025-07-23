@@ -15,6 +15,7 @@ import logging
 from datetime import datetime
 import json
 import numpy as np
+import pandas as pd
 
 # モジュールのインポート
 from modules.utils import (
@@ -301,7 +302,12 @@ def save_results(trainer, evaluation_results, config, timestamps):
     logger = logging.getLogger(__name__)
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = config['data']['output_dir']
+    
+    # 出力ディレクトリを models/evaluation_report/ に設定
+    output_dir = os.path.join(config['data']['output_dir'], 'evaluation_report')
+    os.makedirs(output_dir, exist_ok=True)  # ディレクトリ作成
+    
+    logger.info(f"評価結果保存先: {output_dir}")
     
     # 評価レポート保存
     report_path = os.path.join(output_dir, f"evaluation_report_{timestamp}.json")
@@ -309,9 +315,10 @@ def save_results(trainer, evaluation_results, config, timestamps):
     
     # 可視化
     try:
-        # 訓練履歴グラフ
-        history_plot_path = os.path.join(output_dir, f"training_history_{timestamp}.png")
-        trainer.plot_training_history(history_plot_path)
+        # 訓練履歴グラフ（もしあれば）
+        if hasattr(trainer, 'training_history') and trainer.training_history:
+            history_plot_path = os.path.join(output_dir, f"training_history_{timestamp}.png")
+            trainer.plot_training_history(history_plot_path)
         
         # 混同行列
         cm_plot_path = os.path.join(output_dir, f"confusion_matrix_{timestamp}.png")
@@ -331,10 +338,34 @@ def save_results(trainer, evaluation_results, config, timestamps):
     # MT5連携用シグナルファイル出力
     if config['evaluation']['export_format'] == 'csv':
         try:
-            # サンプル予測データ（実際の運用では最新データを使用）
-            signals_path = os.path.join(output_dir, f"trading_signals_{timestamp}.csv")
-            # trainer.generate_trading_signals(...).to_csv(signals_path, index=False)
-            logger.info(f"取引シグナル出力: {signals_path}")
+            # 予測結果をシグナル形式に変換
+            if len(timestamps) > 0:
+                # テストデータのシンプルな予測結果を出力
+                signals_path = os.path.join(output_dir, f"trading_signals_{timestamp}.csv")
+                
+                # 簡単なシグナルファイル作成
+                y_pred = evaluation_results['predictions']['y_pred']
+                y_prob = evaluation_results['predictions']['y_pred_proba']
+                class_names = config['labels']['class_names']
+                
+                signals_data = []
+                for i, (pred, prob) in enumerate(zip(y_pred, y_prob)):
+                    if i < len(timestamps):
+                        timestamp_val = timestamps[i] if hasattr(timestamps[i], 'isoformat') else str(timestamps[i])
+                        signals_data.append({
+                            'timestamp': timestamp_val,
+                            'signal': class_names[pred],
+                            'confidence': max(prob),
+                            'buy_probability': prob[0],
+                            'sell_probability': prob[1],
+                            'no_trade_probability': prob[2],
+                            'trade_recommended': max(prob) >= config['evaluation']['min_confidence'] and pred != 2
+                        })
+                
+                signals_df = pd.DataFrame(signals_data)
+                signals_df.to_csv(signals_path, index=False)
+                logger.info(f"取引シグナル出力: {signals_path}")
+                
         except Exception as e:
             logger.warning(f"シグナル出力でエラーが発生: {e}")
     
@@ -342,9 +373,11 @@ def save_results(trainer, evaluation_results, config, timestamps):
     performance_summary = {
         'timestamp': timestamp,
         'test_accuracy': evaluation_results['test_accuracy'],
+        'test_loss': evaluation_results['test_loss'],
         'best_threshold': get_best_threshold(evaluation_results['threshold_evaluation']),
-        'model_parameters': trainer.model_wrapper.model.count_params() if trainer.model_wrapper.model else 0,
-        'training_time': 'N/A',  # 実際の実装では訓練時間を記録
+        'f1_scores': evaluation_results['f1_scores'],
+        'threshold_performance': evaluation_results['threshold_evaluation'],
+        'model_path': trainer.model_path if hasattr(trainer, 'model_path') else 'unknown',
         'memory_usage_mb': memory_usage_mb()
     }
     
@@ -353,6 +386,13 @@ def save_results(trainer, evaluation_results, config, timestamps):
         json.dump(performance_summary, f, indent=2, ensure_ascii=False)
     
     logger.info(f"結果保存完了 - 出力ディレクトリ: {output_dir}")
+    logger.info(f"生成ファイル:")
+    logger.info(f"  - 評価レポート: evaluation_report_{timestamp}.json")
+    logger.info(f"  - 混同行列: confusion_matrix_{timestamp}.png")
+    logger.info(f"  - 閾値分析: threshold_analysis_{timestamp}.png")
+    logger.info(f"  - パフォーマンス要約: performance_summary_{timestamp}.json")
+    if config['evaluation']['export_format'] == 'csv':
+        logger.info(f"  - 取引シグナル: trading_signals_{timestamp}.csv")
 
 def get_best_threshold(threshold_results):
     """最適な閾値を取得"""

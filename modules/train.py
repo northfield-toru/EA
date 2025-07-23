@@ -150,8 +150,14 @@ class ModelTrainer:
         y_pred_proba = self.model_wrapper.model.predict(X_test, verbose=0)
         y_pred = np.argmax(y_pred_proba, axis=1)
         
-        # 基本メトリクス
-        test_loss, test_accuracy = self.model_wrapper.model.evaluate(X_test, y_test, verbose=0)
+        # 基本メトリクス（複数の戻り値に対応）
+        eval_results = self.model_wrapper.model.evaluate(X_test, y_test, verbose=0)
+        if isinstance(eval_results, list):
+            test_loss = eval_results[0]
+            test_accuracy = eval_results[1]  # 最初のaccuracyメトリクス
+        else:
+            test_loss = eval_results
+            test_accuracy = np.mean(y_test == y_pred)  # 手動計算
         
         # 分類レポート
         class_names = self.labels_config['class_names']
@@ -175,8 +181,8 @@ class ModelTrainer:
         threshold_results = self._evaluate_with_thresholds(X_test, y_test, y_pred_proba)
         
         evaluation_results = {
-            'test_loss': test_loss,
-            'test_accuracy': test_accuracy,
+            'test_loss': float(test_loss),
+            'test_accuracy': float(test_accuracy),
             'classification_report': report,
             'confusion_matrix': cm.tolist(),
             'f1_scores': f1_scores,
