@@ -211,9 +211,12 @@ class FeatureEngine:
                 labels.append(df.iloc[i]['label'])
         
         X = np.array(sequences)
-        y = np.array(labels) if labels else None
+        y = np.array(labels, dtype=np.int32) if labels else None  # 整数型を明示
         
         logger.info(f"シーケンス作成完了: {X.shape}, 特徴量数: {len(feature_columns)}")
+        if y is not None:
+            logger.info(f"ラベル形状: {y.shape}, ラベル型: {y.dtype}")
+            logger.info(f"ラベル分布: {np.unique(y, return_counts=True)}")
         
         return X, y, feature_columns, timestamps
     

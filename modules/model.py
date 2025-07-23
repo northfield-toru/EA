@@ -316,12 +316,10 @@ class ScalpingModel:
         # 損失関数
         loss = 'sparse_categorical_crossentropy'
         
-        # メトリクス
+        # メトリクス（整数ラベル用に修正）
         metrics = [
-            'accuracy',
-            tf.keras.metrics.SparseCategoricalAccuracy(name='sparse_accuracy'),
-            tf.keras.metrics.Precision(name='precision'),
-            tf.keras.metrics.Recall(name='recall')
+            'sparse_categorical_accuracy',  # デフォルトのaccuracyを削除
+            tf.keras.metrics.SparseCategoricalAccuracy(name='accuracy'),  # 明示的に指定
         ]
         
         self.model.compile(

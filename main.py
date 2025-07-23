@@ -193,8 +193,82 @@ def run_evaluation_only(config):
     
     logger.info(f"評価対象モデル: {model_path}")
     
-    # テストデータ準備（前処理済みデータから）
-    # ... 実装内容は省略（実際の使用時に詳細実装）
+    try:
+        # メタデータ読み込み（エラーハンドリング）
+        feature_names = None
+        try:
+            from modules.utils import load_model_metadata
+            metadata = load_model_metadata(model_path)
+            if metadata and 'feature_names' in metadata:
+                feature_names = metadata['feature_names']
+                logger.info(f"メタデータから特徴量名を取得: {len(feature_names)}個")
+        except Exception as e:
+            logger.warning(f"メタデータ読み込みエラー（無視して続行）: {e}")
+        
+        # データ読み込み・前処理（元の訓練データを使用）
+        logger.info("評価用データ準備")
+        data_loader = TickDataLoader(config)
+        df = data_loader.load_tick_data()
+        df = data_loader.create_sample_dataset(df, sample_ratio=0.1)  # サンプルモード相当
+        
+        # 特徴量エンジニアリング
+        feature_engine = FeatureEngine(config)
+        df = feature_engine.calculate_technical_indicators(df)
+        
+        # ラベリング
+        label_engine = LabelEngine(config)
+        df = label_engine.generate_labels(df)
+        
+        # シーケンス作成
+        X, y, feature_names, timestamps = feature_engine.create_sequences(df)
+        logger.info(f"評価データ準備完了: X.shape={X.shape}, y.shape={y.shape}")
+        
+        # データ分割（テストデータのみ使用）
+        trainer = ModelTrainer(config)
+        X_train, X_val, X_test, y_train, y_val, y_test = trainer.prepare_data(X, y)
+        
+        # 訓練済みモデル読み込み
+        import tensorflow as tf
+        trained_model = tf.keras.models.load_model(model_path)
+        trainer.model_wrapper.model = trained_model  # モデルを設定
+        
+        logger.info("モデル読み込み完了")
+        
+        # 評価実行
+        logger.info("モデル評価開始")
+        evaluation_results = trainer.evaluate_model(X_test, y_test)
+        
+        # 結果保存・可視化
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        save_results(trainer, evaluation_results, config, timestamps[-len(X_test):])
+        
+        # サマリー表示
+        logger.info("="*50)
+        logger.info("評価結果サマリー")
+        logger.info("="*50)
+        logger.info(f"テスト精度: {evaluation_results['test_accuracy']:.4f}")
+        logger.info(f"テスト損失: {evaluation_results['test_loss']:.4f}")
+        
+        # クラス別F1スコア
+        for class_name, f1 in evaluation_results['f1_scores'].items():
+            logger.info(f"{class_name} F1スコア: {f1:.4f}")
+        
+        # 閾値別性能表示
+        logger.info("\n閾値別性能:")
+        for threshold, metrics in evaluation_results['threshold_evaluation'].items():
+            logger.info(f"閾値{threshold}: 精度={metrics['accuracy']:.3f}, "
+                       f"F1={metrics['f1_score']:.3f}, カバレッジ={metrics['coverage']:.3f}")
+        
+        # 最適閾値の推奨
+        best_threshold = get_best_threshold(evaluation_results['threshold_evaluation'])
+        logger.info(f"\n推奨信頼度閾値: {best_threshold}")
+        
+        logger.info("="*50)
+        logger.info("評価レポートと可視化ファイルが models/ フォルダに保存されました。")
+        
+    except Exception as e:
+        logger.error(f"評価中にエラーが発生: {e}")
+        logger.exception("詳細なエラー情報:")
     
     logger.info("評価のみ実行完了")
 
