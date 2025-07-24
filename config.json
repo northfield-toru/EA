@@ -3,7 +3,7 @@
     "pair": "USDJPY",
     "spread_pips": 0.7,
     "pip_value": 0.01,
-    "tp_pips": 5.0,
+    "tp_pips": 4.0,
     "sl_pips": 4.0,
     "future_window": 200
   },
@@ -36,7 +36,7 @@
     },
     "sma_periods": [5, 10, 20, 50],
     "ema_periods": [5, 10, 20, 50],
-    "sequence_length": 25,
+    "sequence_length": 30,
     "lookback_window": 200
   },
   "model": {
@@ -50,7 +50,7 @@
     "learning_rate": 0.0001,
     "batch_size": 64,
     "epochs": 50,
-    "early_stopping_patience": 7,
+    "early_stopping_patience": 15,
     "reduce_lr_patience": 4
   },
   "labels": {
@@ -73,7 +73,7 @@
   },
   "_backtest_settings": {
     "enabled": true,
-    "description": "バックテスト専用設定",
+    "description": "Backtest specific settings",
     "sl_buffer_pips": 1.0,
     "max_positions": 1,
     "position_timeout_ticks": 1000,

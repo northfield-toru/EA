@@ -8,15 +8,87 @@ from typing import Dict, Any, Tuple, List
 import logging
 import os
 from datetime import datetime
+import tensorflow as tf
 
 from .model import ScalpingModel
 from .utils import time_series_split, save_model_metadata, memory_usage_mb
 
 logger = logging.getLogger(__name__)
 
+class F1ScoreEarlyStopping(tf.keras.callbacks.Callback):
+    """
+    ChatGPT推奨: BUY クラスF1スコア監視のEarly Stopping
+    SELL偏重問題の根本解決
+    """
+    
+    def __init__(self, monitor_class='BUY', patience=7, min_delta=0.01, restore_best_weights=True, **kwargs):
+        super().__init__(**kwargs)
+        self.monitor_class = monitor_class
+        self.patience = patience
+        self.min_delta = min_delta
+        self.restore_best_weights = restore_best_weights
+        self.wait = 0
+        self.best_f1 = 0
+        self.best_weights = None
+        
+        logger.info(f"F1監視Early Stopping初期化: {monitor_class}クラス, patience={patience}")
+    
+    def on_train_begin(self, logs=None):
+        self.wait = 0
+        self.best_f1 = 0
+        self.best_weights = None
+    
+    def on_epoch_end(self, epoch, logs=None):
+        # 検証データでBUY F1スコア計算
+        if hasattr(self.model, 'validation_data') and self.model.validation_data:
+            val_x, val_y = self.validation_data[0], self.validation_data[1]
+        else:
+            # validation_dataが直接アクセスできない場合
+            return
+        
+        val_pred = self.model.predict(val_x, verbose=0)
+        val_pred_classes = np.argmax(val_pred, axis=1)
+        val_true = val_y
+        
+        # BUY クラス（class=0）のF1スコア計算
+        buy_mask_true = (val_true == 0)
+        buy_mask_pred = (val_pred_classes == 0)
+        
+        if buy_mask_true.sum() > 0 and buy_mask_pred.sum() > 0:
+            # Precision = TP / (TP + FP)
+            precision = np.sum(buy_mask_true & buy_mask_pred) / buy_mask_pred.sum()
+            # Recall = TP / (TP + FN)
+            recall = np.sum(buy_mask_true & buy_mask_pred) / buy_mask_true.sum()
+            
+            if precision + recall > 0:
+                f1_buy = 2 * (precision * recall) / (precision + recall)
+            else:
+                f1_buy = 0
+        else:
+            f1_buy = 0
+        
+        # ログ出力
+        print(f"\nEpoch {epoch+1} - BUY F1: {f1_buy:.4f} (Best: {self.best_f1:.4f})")
+        
+        # 改善チェック
+        if f1_buy > self.best_f1 + self.min_delta:
+            self.best_f1 = f1_buy
+            self.wait = 0
+            if self.restore_best_weights:
+                self.best_weights = self.model.get_weights()
+            print(f"✅ BUY F1改善: {f1_buy:.4f}")
+        else:
+            self.wait += 1
+            if self.wait >= self.patience:
+                print(f"\n🛑 BUY F1が{self.patience}エポック改善せず。Early Stopping実行。")
+                if self.restore_best_weights and self.best_weights is not None:
+                    self.model.set_weights(self.best_weights)
+                    print("最良重みを復元しました。")
+                self.model.stop_training = True
+
 class ModelTrainer:
     """
-    スキャルピングモデル訓練管理クラス
+    スキャルピングモデル訓練管理クラス（ChatGPT推奨強化版）
     """
     
     def __init__(self, config: Dict[str, Any]):
@@ -28,6 +100,9 @@ class ModelTrainer:
         self.model_wrapper = ScalpingModel(config)
         self.training_history = None
         self.model_path = None
+        
+        # ChatGPT推奨: SELL偏重検出フラグ
+        self.sell_bias_detected = False
         
     def prepare_data(self, X: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
@@ -55,37 +130,198 @@ class ModelTrainer:
         logger.info(f"  検証: {X_val.shape[0]:,} サンプル")
         logger.info(f"  テスト: {X_test.shape[0]:,} サンプル")
         
-        # ラベル分布確認
+        # ラベル分布確認とSELL偏重検出
         for split_name, y_split in [("訓練", y_train), ("検証", y_val), ("テスト", y_test)]:
             unique, counts = np.unique(y_split, return_counts=True)
             dist = dict(zip(unique, counts))
             logger.info(f"  {split_name}ラベル分布: {dist}")
+            
+            # SELL偏重検出（訓練データで判定）
+            if split_name == "訓練":
+                total = len(y_split)
+                sell_ratio = dist.get(1, 0) / total  # SELL=1
+                buy_ratio = dist.get(0, 0) / total   # BUY=0
+                
+                if sell_ratio > 0.7:
+                    self.sell_bias_detected = True
+                    logger.warning(f"🚨 深刻なSELL偏重検出: SELL={sell_ratio:.1%}, BUY={buy_ratio:.1%}")
+                elif sell_ratio > 0.6:
+                    self.sell_bias_detected = True
+                    logger.warning(f"⚠️ SELL偏重検出: SELL={sell_ratio:.1%}, BUY={buy_ratio:.1%}")
+                else:
+                    logger.info(f"✅ クラス分布良好: SELL={sell_ratio:.1%}, BUY={buy_ratio:.1%}")
         
         return X_train, X_val, X_test, y_train, y_val, y_test
     
-    def calculate_class_weights(self, y_train: np.ndarray) -> Dict[int, float]:
+    def calculate_enhanced_class_weights(self, y_train: np.ndarray) -> Dict[int, float]:
         """
-        クラス重みを計算（不均衡対策）
+        ChatGPT推奨の強化版クラス重み計算
+        SELL偏重を完全に補正
         """
         unique_classes = np.unique(y_train)
-        class_weights_array = compute_class_weight(
-            'balanced',
-            classes=unique_classes,
-            y=y_train
+        
+        # 基本的な不均衡補正
+        base_weights = compute_class_weight('balanced', classes=unique_classes, y=y_train)
+        
+        # ラベル分布確認
+        buy_count = np.sum(y_train == self.labels_config['buy_class'])
+        sell_count = np.sum(y_train == self.labels_config['sell_class'])
+        no_trade_count = np.sum(y_train == self.labels_config['no_trade_class'])
+        
+        total = len(y_train)
+        buy_ratio = buy_count / total
+        sell_ratio = sell_count / total
+        no_trade_ratio = no_trade_count / total
+        
+        logger.info(f"詳細ラベル分布:")
+        logger.info(f"  BUY: {buy_count:,} ({buy_ratio:.1%})")
+        logger.info(f"  SELL: {sell_count:,} ({sell_ratio:.1%})")
+        logger.info(f"  NO_TRADE: {no_trade_count:,} ({no_trade_ratio:.1%})")
+        
+        # ChatGPT推奨: SELL偏重レベルに応じた動的補正
+        if sell_ratio > 0.8:
+            # 極度のSELL偏重（緊急対策）
+            sell_penalty = 0.3      # SELL重みを大幅削減
+            buy_boost = 5.0         # BUY重みを5倍に増強
+            no_trade_adjust = 1.2   # NO_TRADE軽微増強
+            
+            logger.warning("🚨 極度SELL偏重 - 緊急対策適用")
+            
+        elif sell_ratio > 0.7:
+            # 深刻なSELL偏重
+            sell_penalty = 0.4      # SELL重みを大幅削減
+            buy_boost = 4.0         # BUY重みを4倍に増強
+            no_trade_adjust = 1.0
+            
+            logger.warning("🚨 深刻SELL偏重 - 強力対策適用")
+            
+        elif sell_ratio > 0.6:
+            # 中程度のSELL偏重
+            sell_penalty = 0.6      # SELL重みを削減
+            buy_boost = 2.5         # BUY重みを2.5倍に増強
+            no_trade_adjust = 1.0
+            
+            logger.warning("⚠️ 中程度SELL偏重 - 標準対策適用")
+            
+        else:
+            # 正常範囲 - 軽微な調整のみ
+            sell_penalty = 0.8
+            buy_boost = 1.5
+            no_trade_adjust = 1.0
+            
+            logger.info("✅ 正常範囲 - 軽微補正のみ")
+        
+        # 最終クラス重み計算
+        enhanced_weights = {}
+        for i, class_idx in enumerate(unique_classes):
+            base_weight = base_weights[i]
+            
+            if class_idx == self.labels_config['buy_class']:
+                enhanced_weights[class_idx] = float(base_weight * buy_boost)
+            elif class_idx == self.labels_config['sell_class']:
+                enhanced_weights[class_idx] = float(base_weight * sell_penalty)
+            elif class_idx == self.labels_config['no_trade_class']:
+                enhanced_weights[class_idx] = float(base_weight * no_trade_adjust)
+            else:
+                enhanced_weights[class_idx] = float(base_weight)
+        
+        logger.info(f"最終クラス重み:")
+        for class_idx, weight in enhanced_weights.items():
+            class_name = self.labels_config['class_names'][class_idx]
+            logger.info(f"  {class_name}: {weight:.3f}")
+        
+        return enhanced_weights
+    
+    def calculate_class_weights(self, y_train: np.ndarray) -> Dict[int, float]:
+        """
+        標準クラス重み計算（後方互換用）
+        新しいenhanced版を使用することを推奨
+        """
+        if self.sell_bias_detected:
+            logger.info("SELL偏重検出のため強化版クラス重みを使用")
+            return self.calculate_enhanced_class_weights(y_train)
+        else:
+            # 標準的な balanced 重み
+            unique_classes = np.unique(y_train)
+            class_weights_array = compute_class_weight(
+                'balanced',
+                classes=unique_classes,
+                y=y_train
+            )
+            
+            class_weights = dict(zip(unique_classes, class_weights_array))
+            logger.info(f"標準クラス重み: {class_weights}")
+            return class_weights
+    
+    def get_enhanced_callbacks(self, model_path: str) -> List[tf.keras.callbacks.Callback]:
+        """
+        ChatGPT推奨の強化版コールバック
+        F1スコア監視Early Stopping含む
+        """
+        callbacks_list = []
+        
+        # ChatGPT最重要推奨: BUY F1スコア監視Early Stopping
+        if self.sell_bias_detected:
+            f1_callback = F1ScoreEarlyStopping(
+                monitor_class='BUY',
+                patience=10,
+                min_delta=0.005,  # より敏感に
+                restore_best_weights=True
+            )
+            callbacks_list.append(f1_callback)
+            logger.info("✅ BUY F1監視Early Stopping追加（SELL偏重対策）")
+        
+        # 標準Early Stopping（バックアップ）
+        standard_early_stopping = tf.keras.callbacks.EarlyStopping(
+            monitor='val_loss',  # ChatGPT推奨: accuracyではなくloss監視
+            patience=15,         # より長い忍耐
+            restore_best_weights=True,
+            min_delta=0.001,
+            verbose=1
         )
+        callbacks_list.append(standard_early_stopping)
         
-        class_weights = dict(zip(unique_classes, class_weights_array))
+        # Model Checkpoint
+        checkpoint = tf.keras.callbacks.ModelCheckpoint(
+            filepath=model_path,
+            monitor='val_accuracy',
+            save_best_only=True,
+            save_weights_only=False,
+            verbose=1
+        )
+        callbacks_list.append(checkpoint)
         
-        logger.info(f"クラス重み: {class_weights}")
-        return class_weights
+        # Learning Rate Reduction
+        lr_reduction = tf.keras.callbacks.ReduceLROnPlateau(
+            monitor='val_loss',
+            factor=0.7,          # より緩やかな削減
+            patience=7,          # より長い忍耐
+            min_lr=1e-8,
+            verbose=1
+        )
+        callbacks_list.append(lr_reduction)
+        
+        # CSV Logger
+        csv_logger = tf.keras.callbacks.CSVLogger(
+            model_path.replace('.h5', '_training_log.csv'),
+            append=True
+        )
+        callbacks_list.append(csv_logger)
+        
+        # ChatGPT推奨: クラス分布監視
+        class_monitor = ClassDistributionMonitor(log_frequency=5)
+        callbacks_list.append(class_monitor)
+        
+        logger.info(f"コールバック設定完了: {len(callbacks_list)}個")
+        return callbacks_list
     
     def train_model(self, X_train: np.ndarray, y_train: np.ndarray,
                    X_val: np.ndarray, y_val: np.ndarray,
                    feature_names: List[str] = None) -> str:
         """
-        モデル訓練実行（スケーリングパラメータ保存対応）
+        モデル訓練実行（ChatGPT推奨強化版）
         """
-        logger.info("モデル訓練開始")
+        logger.info("🚀 強化版モデル訓練開始")
         
         # モデル作成
         input_shape = (X_train.shape[1], X_train.shape[2])
@@ -94,8 +330,8 @@ class ModelTrainer:
         # モデルコンパイル
         self.model_wrapper.compile_model()
         
-        # クラス重み計算
-        class_weights = self.calculate_class_weights(y_train)
+        # 強化版クラス重み計算（ChatGPT推奨）
+        class_weights = self.calculate_enhanced_class_weights(y_train)
         
         # モデル保存パス
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -105,44 +341,72 @@ class ModelTrainer:
             f"scalping_model_{architecture}_{timestamp}.h5"
         )
         
-        # コールバック設定
-        callbacks = self.model_wrapper.get_callbacks(self.model_path)
+        # 強化版コールバック設定
+        callbacks = self.get_enhanced_callbacks(self.model_path)
         
         # 訓練実行
-        logger.info(f"訓練開始 - エポック数: {self.model_config['epochs']}")
-        logger.info(f"バッチサイズ: {self.model_config['batch_size']}")
-        logger.info(f"メモリ使用量: {memory_usage_mb():.1f}MB")
+        logger.info(f"訓練パラメータ:")
+        logger.info(f"  エポック数: {self.model_config['epochs']}")
+        logger.info(f"  バッチサイズ: {self.model_config['batch_size']}")
+        logger.info(f"  学習率: {self.model_config['learning_rate']}")
+        logger.info(f"  メモリ使用量: {memory_usage_mb():.1f}MB")
+        logger.info(f"  SELL偏重対策: {'有効' if self.sell_bias_detected else '無効'}")
+        
+        # ChatGPT最重要推奨: shuffle=True（時系列でもSELL偏重対策のため）
+        shuffle_data = True if self.sell_bias_detected else False
+        logger.info(f"  データシャッフル: {'有効' if shuffle_data else '無効'}（SELL偏重対策）")
         
         history = self.model_wrapper.model.fit(
             X_train, y_train,
             validation_data=(X_val, y_val),
             epochs=self.model_config['epochs'],
             batch_size=self.model_config['batch_size'],
-            class_weight=class_weights,
+            class_weight=class_weights,  # ChatGPT推奨: 必須
             callbacks=callbacks,
             verbose=1,
-            shuffle=False  # 時系列データなのでシャッフル禁止
+            shuffle=shuffle_data  # ChatGPT推奨: SELL偏重時はTrue
         )
+        
+        # Callbackにvalidationデータをセットするためのハック
+        for callback in callbacks:
+            if hasattr(callback, 'validation_data'):
+                callback.validation_data = (X_val, y_val)
         
         self.training_history = history.history
         
-        # メタデータ保存（スケーリングパラメータも含む）
+        # メタデータ保存（強化版情報も含む）
+        metadata_info = {
+            'sell_bias_detected': self.sell_bias_detected,
+            'enhanced_class_weights': class_weights,
+            'shuffle_enabled': shuffle_data
+        }
+        
         save_model_metadata(
             self.model_path,
             self.config,
             self.training_history,
             feature_names,
-            scaling_params=getattr(self, 'scaling_params', None)  # スケーリングパラメータを追加
+            scaling_params=getattr(self, 'scaling_params', None),
+            enhanced_info=metadata_info
         )
         
-        logger.info(f"訓練完了 - モデル保存: {self.model_path}")
+        logger.info(f"✅ 訓練完了 - モデル保存: {self.model_path}")
+        
+        # 訓練結果サマリー
+        final_epoch = len(self.training_history['loss'])
+        final_acc = self.training_history['val_accuracy'][-1]
+        logger.info(f"📊 訓練結果サマリー:")
+        logger.info(f"  最終エポック: {final_epoch}")
+        logger.info(f"  最終検証精度: {final_acc:.4f}")
+        logger.info(f"  SELL偏重対策: {'適用済み' if self.sell_bias_detected else '適用なし'}")
+        
         return self.model_path
     
     def evaluate_model(self, X_test: np.ndarray, y_test: np.ndarray) -> Dict[str, Any]:
         """
-        モデル評価
+        モデル評価（ChatGPT推奨指標追加）
         """
-        logger.info("モデル評価開始")
+        logger.info("📊 強化版モデル評価開始")
         
         if self.model_wrapper.model is None:
             raise ValueError("モデルが未訓練です")
@@ -151,14 +415,14 @@ class ModelTrainer:
         y_pred_proba = self.model_wrapper.model.predict(X_test, verbose=0)
         y_pred = np.argmax(y_pred_proba, axis=1)
         
-        # 基本メトリクス（複数の戻り値に対応）
+        # 基本メトリクス
         eval_results = self.model_wrapper.model.evaluate(X_test, y_test, verbose=0)
         if isinstance(eval_results, list):
             test_loss = eval_results[0]
-            test_accuracy = eval_results[1]  # 最初のaccuracyメトリクス
+            test_accuracy = eval_results[1]
         else:
             test_loss = eval_results
-            test_accuracy = np.mean(y_test == y_pred)  # 手動計算
+            test_accuracy = np.mean(y_test == y_pred)
         
         # 分類レポート
         class_names = self.labels_config['class_names']
@@ -172,11 +436,14 @@ class ModelTrainer:
         # 混同行列
         cm = confusion_matrix(y_test, y_pred)
         
-        # F1スコア（各クラス別）
-        f1_scores = {
-            class_names[i]: f1_score(y_test, y_pred, labels=[i], average='macro', zero_division=0)
-            for i in range(len(class_names))
-        }
+        # ChatGPT推奨: クラス別F1スコア（正確な計算）
+        f1_scores = {}
+        for i, class_name in enumerate(class_names):
+            f1_class = f1_score(y_test, y_pred, labels=[i], average='macro', zero_division=0)
+            f1_scores[class_name] = f1_class
+        
+        # ChatGPT推奨: SELL偏重診断
+        sell_bias_analysis = self._analyze_sell_bias(y_pred, y_test)
         
         # 閾値別評価
         threshold_results = self._evaluate_with_thresholds(X_test, y_test, y_pred_proba)
@@ -187,6 +454,7 @@ class ModelTrainer:
             'classification_report': report,
             'confusion_matrix': cm.tolist(),
             'f1_scores': f1_scores,
+            'sell_bias_analysis': sell_bias_analysis,  # 新規追加
             'threshold_evaluation': threshold_results,
             'predictions': {
                 'y_true': y_test.tolist(),
@@ -195,14 +463,69 @@ class ModelTrainer:
             }
         }
         
-        logger.info(f"評価完了 - テスト精度: {test_accuracy:.4f}")
+        # 評価結果ログ
+        logger.info(f"📊 評価結果:")
+        logger.info(f"  テスト精度: {test_accuracy:.4f}")
+        logger.info(f"  テスト損失: {test_loss:.4f}")
+        logger.info(f"  BUY F1: {f1_scores['BUY']:.4f}")
+        logger.info(f"  SELL F1: {f1_scores['SELL']:.4f}")
+        logger.info(f"  SELL偏重度: {sell_bias_analysis['sell_bias_severity']}")
         
         return evaluation_results
+    
+    def _analyze_sell_bias(self, y_pred: np.ndarray, y_test: np.ndarray) -> Dict[str, Any]:
+        """
+        ChatGPT推奨: SELL偏重の詳細分析
+        """
+        total_predictions = len(y_pred)
+        
+        # 予測分布
+        pred_counts = np.bincount(y_pred, minlength=3)
+        buy_pred_ratio = pred_counts[0] / total_predictions
+        sell_pred_ratio = pred_counts[1] / total_predictions
+        no_trade_pred_ratio = pred_counts[2] / total_predictions
+        
+        # SELL偏重度判定
+        if sell_pred_ratio > 0.8:
+            severity = "極度"
+            recommendation = "緊急対策必要"
+        elif sell_pred_ratio > 0.7:
+            severity = "深刻"
+            recommendation = "強力対策必要"
+        elif sell_pred_ratio > 0.6:
+            severity = "中程度"
+            recommendation = "標準対策推奨"
+        else:
+            severity = "正常"
+            recommendation = "対策不要"
+        
+        # 実際のBUYをSELLと誤分類した率
+        buy_mask = (y_test == 0)
+        if buy_mask.sum() > 0:
+            buy_to_sell_error = np.sum((y_test == 0) & (y_pred == 1)) / buy_mask.sum()
+        else:
+            buy_to_sell_error = 0
+        
+        analysis = {
+            'sell_prediction_ratio': float(sell_pred_ratio),
+            'buy_prediction_ratio': float(buy_pred_ratio),
+            'no_trade_prediction_ratio': float(no_trade_pred_ratio),
+            'sell_bias_severity': severity,
+            'recommendation': recommendation,
+            'buy_to_sell_error_rate': float(buy_to_sell_error),
+            'prediction_counts': {
+                'BUY': int(pred_counts[0]),
+                'SELL': int(pred_counts[1]),
+                'NO_TRADE': int(pred_counts[2])
+            }
+        }
+        
+        return analysis
     
     def _evaluate_with_thresholds(self, X_test: np.ndarray, y_test: np.ndarray, 
                                  y_pred_proba: np.ndarray) -> Dict[str, Any]:
         """
-        様々な信頼度閾値での評価
+        様々な信頼度閾値での評価（既存）
         """
         thresholds = self.config['evaluation']['prediction_thresholds']
         threshold_results = {}
@@ -247,6 +570,7 @@ class ModelTrainer:
         
         return threshold_results
     
+    # 以下、既存のplot系メソッドは変更なし
     def plot_training_history(self, save_path: str = None):
         """
         訓練履歴の可視化
@@ -290,8 +614,6 @@ class ModelTrainer:
         
         # Precision/Recall
         if 'precision' in self.training_history:
-            axes[1, 1].plot(self.training_history['precision'], label='Precision')
-            axes[1, 1].plot(self.training_history['recall'], label='Recall')
             axes[1, 1].set_title('Precision & Recall')
             axes[1, 1].set_xlabel('Epoch')
             axes[1, 1].set_ylabel('Score')
@@ -481,6 +803,7 @@ class ModelTrainer:
         serializable_results['evaluation_timestamp'] = datetime.now().isoformat()
         serializable_results['model_path'] = self.model_path
         serializable_results['config'] = self.config
+        serializable_results['sell_bias_detected'] = self.sell_bias_detected
         
         with open(report_path, 'w', encoding='utf-8') as f:
             json.dump(serializable_results, f, indent=2, ensure_ascii=False)
@@ -527,3 +850,48 @@ class ModelTrainer:
         logger.info(f"  取引推奨: {trade_signals:,} ({trade_signals/total_signals*100:.1f}%)")
         
         return signals_df
+
+class ClassDistributionMonitor(tf.keras.callbacks.Callback):
+    """
+    ChatGPT推奨: 訓練中のクラス分布監視コールバック
+    SELL偏重の早期発見
+    """
+    
+    def __init__(self, log_frequency=5):
+        super().__init__()
+        self.log_frequency = log_frequency
+    
+    def on_epoch_end(self, epoch, logs=None):
+        if epoch % self.log_frequency == 0:
+            # 検証データで予測実行
+            if hasattr(self.model, 'validation_data') and self.model.validation_data:
+                val_x, val_y = self.validation_data[0], self.validation_data[1]
+                predictions = self.model.predict(val_x, verbose=0)
+                pred_classes = np.argmax(predictions, axis=1)
+                
+                # クラス分布計算
+                unique, counts = np.unique(pred_classes, return_counts=True)
+                total = len(pred_classes)
+                
+                distribution = {}
+                class_names = ['BUY', 'SELL', 'NO_TRADE']
+                for i, name in enumerate(class_names):
+                    count = counts[unique == i][0] if i in unique else 0
+                    distribution[name] = f"{count/total*100:.1f}%"
+                
+                print(f"\nEpoch {epoch+1} - 予測分布: {distribution}")
+                
+                # SELL偏重警告
+                sell_ratio = counts[unique == 1][0] / total if 1 in unique else 0
+                if sell_ratio > 0.8:
+                    print(f"🚨 SELL偏重警告: {sell_ratio:.1%}")
+                elif sell_ratio > 0.7:
+                    print(f"⚠️ SELL偏重注意: {sell_ratio:.1%}")
+
+# 使用方法の例
+def create_enhanced_trainer(config):
+    """
+    強化版トレーナーの作成例
+    """
+    trainer = ModelTrainer(config)
+    return trainer
