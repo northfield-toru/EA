@@ -8,6 +8,7 @@ import os
 import sys
 import warnings
 import traceback
+import numpy as np
 from datetime import datetime
 
 # 警告を抑制
@@ -138,7 +139,31 @@ def main():
         X, y = feature_engineer.create_sequences(features, labels_valid)
         logger.info(f"シーケンス作成完了: X{X.shape}, y{y.shape}")
         
-        # 正規化
+        # メモリ使用量確認
+        memory_usage_check()
+        
+        # データサイズチェック
+        data_size_gb = X.nbytes / (1024**3)
+        logger.info(f"データサイズ: {data_size_gb:.2f} GB")
+        
+        if data_size_gb > 8:  # 8GB以上の場合は警告
+            logger.warning(f"大容量データ検出: {data_size_gb:.2f} GB")
+            logger.warning("メモリ不足の場合はサンプリングレートを上げてください")
+            
+            # サンプリング提案
+            suggested_rate = max(2, int(data_size_gb / 4))  # 4GB以下に収める
+            logger.info(f"推奨サンプリングレート: {suggested_rate}")
+            
+            # 自動サンプリング（オプション）
+            if data_size_gb > 12:  # 12GB以上は強制サンプリング
+                logger.warning("メモリ制限により自動サンプリングを実行")
+                sample_indices = np.arange(0, len(X), suggested_rate)
+                X = X[sample_indices]
+                y = y[sample_indices]
+                logger.info(f"サンプリング後: X{X.shape}, y{y.shape}")
+        
+        # 正規化（メモリ効率版）
+        logger.info("特徴量正規化開始（メモリ効率版）")
         X_normalized, _, norm_params = feature_engineer.normalize_features(X)
         logger.info("特徴量正規化完了")
         
@@ -208,15 +233,18 @@ def main():
         
         # エラー情報をファイルに保存
         try:
-            error_log_dir = f"logs/error_{datetime.now().strftime('%Y%m%d_%H%M')}"
+            error_log_dir = "logs/#errors"
             os.makedirs(error_log_dir, exist_ok=True)
             
-            with open(os.path.join(error_log_dir, 'error.txt'), 'w', encoding='utf-8') as f:
+            error_filename = f"error_{datetime.now().strftime('%Y%m%d_%H%M')}.txt"
+            error_file_path = os.path.join(error_log_dir, error_filename)
+            
+            with open(error_file_path, 'w', encoding='utf-8') as f:
                 f.write(f"エラー発生時刻: {datetime.now()}\n")
                 f.write(f"エラーメッセージ: {str(e)}\n\n")
                 f.write(f"トレースバック:\n{traceback.format_exc()}")
             
-            print(f"エラー情報を保存しました: {error_log_dir}")
+            print(f"エラー情報を保存しました: {error_file_path}")
             
         except Exception as save_error:
             print(f"エラー情報の保存に失敗: {save_error}")
